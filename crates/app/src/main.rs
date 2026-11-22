@@ -1,3 +1,7 @@
+#[cfg(not(target_os = "android"))]
 fn main() {
-    println!("Hello, world!");
+    infinite_canvas::desktop::run();
 }
+
+#[cfg(target_os = "android")]
+fn main() {}
