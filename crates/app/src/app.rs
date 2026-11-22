@@ -65,6 +65,8 @@ pub struct CanvasApp {
     last_frame: Instant,
     /// Whether another frame should be drawn soon (animation, pending meshes, input).
     pub wants_redraw: bool,
+    /// Height (points) covered by the status bar / notch at the top.
+    pub safe_top: f32,
 }
 
 impl CanvasApp {
@@ -104,7 +106,21 @@ impl CanvasApp {
             last_change: Instant::now(),
             last_frame: Instant::now(),
             wants_redraw: true,
+            safe_top: 0.0,
         }
+        .with_touch_style()
+    }
+
+    fn with_touch_style(self) -> Self {
+        if cfg!(target_os = "android") {
+            self.egui_ctx.all_styles_mut(|st| {
+                st.spacing.interact_size = egui::vec2(40.0, 34.0);
+                st.spacing.item_spacing = egui::vec2(8.0, 6.0);
+                st.spacing.button_padding = egui::vec2(8.0, 6.0);
+                st.spacing.slider_width = 120.0;
+            });
+        }
+        self
     }
 
     pub fn resize(&mut self, size: [u32; 2]) {
@@ -370,7 +386,7 @@ impl CanvasApp {
         let mut rects = Vec::new();
         let ctx = self.egui_ctx.clone();
         let output = ctx.run_ui(raw_input, |ui| {
-            let (a, r) = ui::toolbar(ui.ctx(), &mut self.tools, &info);
+            let (a, r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
             actions = a;
             rects = r;
         });

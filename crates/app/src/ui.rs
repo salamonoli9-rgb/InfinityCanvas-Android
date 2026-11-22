@@ -79,7 +79,7 @@ fn swatch(ui: &mut egui::Ui, color: Color32, selected: bool) -> egui::Response {
 }
 
 /// Draws the toolbar; returns actions and the screen rects (in points) the UI covers.
-pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info) -> (Actions, Vec<Rect>) {
+pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f32) -> (Actions, Vec<Rect>) {
     let mut a = Actions::default();
     let mut rects = Vec::new();
 
@@ -104,9 +104,11 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info) -> (Actions,
         }
     });
 
-    let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(Align2::CENTER_TOP, [0.0, 8.0]).show(ctx, |ui| {
+    let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top]).show(ctx, |ui| {
+        let max_w = (ctx.content_rect().width() - 16.0).max(200.0);
         egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.set_max_width(max_w);
+            ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut s.tool, Tool::Pen, "✏ Pióro");
                 ui.selectable_value(&mut s.tool, Tool::Eraser, "⌫ Gumka");
                 ui.separator();
