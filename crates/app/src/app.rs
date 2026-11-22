@@ -112,6 +112,7 @@ impl CanvasApp {
     }
 
     fn with_touch_style(self) -> Self {
+        self.egui_ctx.set_theme(egui::Theme::Light);
         if cfg!(target_os = "android") {
             self.egui_ctx.all_styles_mut(|st| {
                 st.spacing.interact_size = egui::vec2(40.0, 34.0);

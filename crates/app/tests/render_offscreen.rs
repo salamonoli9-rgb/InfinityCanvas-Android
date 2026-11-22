@@ -4,7 +4,7 @@ use infinite_canvas::app::CanvasApp;
 use infinite_canvas::gestures::{MouseButton, Phase, PointerEvent, PointerKind};
 use infinite_canvas::render::{Renderer, Target};
 
-const W: u32 = 384; // 384 * 4 bytes is a multiple of 256 (copy alignment)
+const W: u32 = 768; // 384 * 4 bytes is a multiple of 256 (copy alignment)
 const H: u32 = 300;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -190,4 +190,55 @@ fn eraser_and_undo() {
     assert!(dark(&gpu.frame(&mut app), 200, 150));
     app.redo();
     assert_eq!(app.doc.len(), 0);
+}
+
+/// `cargo test --release -p infinite_canvas --test render_offscreen -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn perf_10k_strokes() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 2.0;
+    // 10 000 wavy strokes, all on screen at once (worst case), 20 points each.
+    let mut t = 0.0;
+    for i in 0..10_000u32 {
+        let (x0, y0) = ((i % 100) as f64 * 3.8, 40.0 + (i / 100) as f64 * 2.6);
+        mouse(&mut app, Phase::Down, [x0, y0], t);
+        for k in 1..20 {
+            t += 1.0 / 240.0;
+            let x = x0 + k as f64 * 0.6;
+            let y = y0 + (k as f64 * 0.8).sin() * 3.0;
+            mouse(&mut app, Phase::Move, [x, y], t);
+        }
+        mouse(&mut app, Phase::Up, [x0 + 12.0, y0], t);
+        t += 0.1;
+    }
+    assert_eq!(app.doc.len(), 10_000);
+    // Warm the mesh cache.
+    for _ in 0..200 {
+        gpu.frame(&mut app);
+        if !app.animating() {
+            break;
+        }
+    }
+    let n = 30;
+    let start = std::time::Instant::now();
+    for i in 0..n {
+        app.pan([if i % 2 == 0 { 0.3 } else { -0.3 }, 0.0]);
+        gpu.frame(&mut app);
+    }
+    let per_frame = start.elapsed() / (n * 3); // gpu.frame renders 3 frames
+    eprintln!("10k visible strokes: {per_frame:?} per frame (incl. GPU sync + readback)");
+    // Zoomed in on one area: most strokes culled.
+    app.wheel_zoom([190.0, 150.0], 4.0);
+    gpu.frame(&mut app);
+    let start = std::time::Instant::now();
+    for i in 0..n {
+        app.pan([if i % 2 == 0 { 0.3 } else { -0.3 }, 0.0]);
+        gpu.frame(&mut app);
+    }
+    eprintln!("zoomed 16x: {:?} per frame", start.elapsed() / (n * 3));
 }

@@ -109,8 +109,8 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
         egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
             ui.set_max_width(max_w);
             ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut s.tool, Tool::Pen, "✏ Pióro");
-                ui.selectable_value(&mut s.tool, Tool::Eraser, "⌫ Gumka");
+                ui.selectable_value(&mut s.tool, Tool::Pen, "Pióro");
+                ui.selectable_value(&mut s.tool, Tool::Eraser, "Gumka");
                 ui.separator();
                 let palette = s.palette.clone();
                 for c in palette {
@@ -134,9 +134,9 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     }
                 }
                 ui.separator();
-                a.undo |= ui.add_enabled(info.can_undo, egui::Button::new("↶ Cofnij")).clicked();
-                a.redo |= ui.add_enabled(info.can_redo, egui::Button::new("↷ Ponów")).clicked();
-                a.home |= ui.button("⌂ Początek").on_hover_text("Wróć do początku (Home)").clicked();
+                a.undo |= ui.add_enabled(info.can_undo, egui::Button::new("Cofnij")).clicked();
+                a.redo |= ui.add_enabled(info.can_redo, egui::Button::new("Ponów")).clicked();
+                a.home |= ui.button("Początek").on_hover_text("Wróć do początku (Home)").clicked();
                 ui.separator();
                 ui.label(egui::RichText::new(zoom_text(info.log_zoom)).monospace())
                     .on_hover_text(format!("log2 zoomu: {:.2}\nkresek: {}", info.log_zoom, info.strokes));
