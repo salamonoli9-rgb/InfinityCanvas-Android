@@ -1,0 +1,11 @@
+//! Platform-independent core of the infinite canvas: exact coordinates, camera,
+//! strokes, spatial index, undo history and file format. No GPU code here.
+
+pub mod camera;
+pub mod coords;
+pub mod document;
+pub mod history;
+pub mod io;
+pub mod mesh;
+pub mod smoothing;
+pub mod stroke;
