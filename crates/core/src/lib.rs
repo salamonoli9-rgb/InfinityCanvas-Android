@@ -8,6 +8,7 @@ pub mod history;
 pub mod image;
 pub mod io;
 pub mod mesh;
+pub mod posterize;
 pub mod smoothing;
 pub mod stroke;
 pub mod trace;

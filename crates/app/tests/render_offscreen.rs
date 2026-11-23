@@ -511,7 +511,8 @@ fn photo_turned_into_a_drawing() {
     });
     let mut png = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-    let n = app.photo_to_drawing(&png, 0.5, false).unwrap();
+    let opts = infinite_canvas::app::DrawingOptions { detail: 0.5, colored: false, outlines: true, keep_photo: false };
+    let n = app.photo_to_drawing(&png, opts).unwrap();
     assert!(n >= 1 && app.doc.images().count() == 0);
     let px = gpu.frame(&mut app);
     // Placed like a photo: ×1.2, centred at (384, 150) → the outline has radius 96 on screen.
@@ -527,4 +528,98 @@ fn photo_turned_into_a_drawing() {
     // One undo removes the whole drawing.
     app.undo();
     assert_eq!(app.doc.len(), 0);
+}
+
+/// Visual check of photo → drawing on real pictures:
+/// `PHOTOS=dir OUT=dir cargo test --release -p infinite_canvas --test render_offscreen preview_photo_drawings -- --ignored`
+#[test]
+#[ignore]
+fn preview_photo_drawings() {
+    let (Ok(dir), Ok(out)) = (std::env::var("PHOTOS"), std::env::var("OUT")) else { return };
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+    let mut renderer = Renderer::new(&device, FORMAT);
+    let (w, h) = (640u32, 1024u32);
+    let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    files.sort();
+    for path in files {
+        let bytes = std::fs::read(&path).unwrap();
+        for (tag, colored, outlines, detail) in [("kolor", true, true, 0.5), ("kolor-detal", true, false, 1.0), ("kontury", false, true, 0.5)] {
+            let mut app = CanvasApp::new(None);
+            app.resize([w, h]);
+            app.tools.width = 1.5;
+            let t = std::time::Instant::now();
+            let n = app
+                .photo_to_drawing(&bytes, infinite_canvas::app::DrawingOptions { detail, colored, outlines, keep_photo: false })
+                .unwrap();
+            eprintln!("{} {tag}: {n} strokes in {:?}", path.display(), t.elapsed());
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            for _ in 0..3 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32))),
+                    ..Default::default()
+                };
+                let _ = app.frame(Target::View { device: &device, queue: &queue, format: FORMAT, size: [w, h], view: &view }, &mut renderer, raw);
+            }
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: (w * h * 4) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut enc = device.create_command_encoder(&Default::default());
+            enc.copy_texture_to_buffer(
+                tex.as_image_copy(),
+                wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) } },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            queue.submit([enc.finish()]);
+            buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let data = buf.slice(..).get_mapped_range().unwrap().to_vec();
+            let img = image::RgbaImage::from_raw(w, h, data).unwrap();
+            let name = format!("{}-{tag}.png", path.file_stem().unwrap().to_string_lossy());
+            img.save(std::path::Path::new(&out).join(name)).unwrap();
+            renderer.clear_cache();
+        }
+    }
+}
+
+#[test]
+fn photo_turned_into_a_coloured_drawing() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    // Red with a blue disc (centre (200, 100), radius 60), 400×200 → on screen ×1.2 around (384, 150).
+    let img = image::RgbaImage::from_fn(400, 200, |x, y| {
+        let r = ((x as f32 - 200.0).powi(2) + (y as f32 - 100.0).powi(2)).sqrt();
+        if r < 60.0 { image::Rgba([30, 60, 220, 255]) } else { image::Rgba([220, 30, 40, 255]) }
+    });
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let opts = infinite_canvas::app::DrawingOptions { detail: 0.5, colored: true, outlines: false, keep_photo: false };
+    app.photo_to_drawing(&png, opts).unwrap();
+    let px = gpu.frame(&mut app);
+    let at = |x: u32, y: u32| { let i = ((y * W + x) * 4) as usize; [px[i], px[i + 1], px[i + 2]] };
+    let blue = at(384, 160);
+    let red = at(200, 250);
+    assert!(blue[2] > 180 && blue[0] < 80, "disc is blue: {blue:?}");
+    assert!(red[0] > 180 && red[2] < 80, "background is red: {red:?}");
+    // The corner of the picture is filled (no rounded-off corners): image spans x 144..624, y 30..270.
+    let corner = at(620, 266);
+    assert!(corner[0] > 180 && corner[2] < 80, "corner filled: {corner:?}");
+    assert!(at(130, 250)[1] > 200, "outside the picture: background");
 }

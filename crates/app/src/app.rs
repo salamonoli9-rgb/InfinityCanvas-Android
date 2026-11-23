@@ -111,6 +111,7 @@ pub struct CanvasApp {
     photo_lib: Option<PhotoLibrary>,
     /// Bytes of a photo waiting for "trace over it" / "turn into a drawing".
     pending_photo: Option<Vec<u8>>,
+    pending_preview: Option<image::RgbaImage>,
     save_thread: Option<std::thread::JoinHandle<()>>,
     /// Set when a different document was loaded: cached meshes are keyed by stroke id.
     clear_render_cache: bool,
@@ -160,6 +161,19 @@ impl FrameStats {
             *self = Self::default();
         }
     }
+}
+
+/// How to turn a photo into a drawing.
+#[derive(Clone, Copy, Debug)]
+pub struct DrawingOptions {
+    /// 0..1
+    pub detail: f32,
+    /// Colour patches as filled shapes (an illustration) instead of outlines only.
+    pub colored: bool,
+    /// Outlines on top of the colours (always on for the outline-only style).
+    pub outlines: bool,
+    /// Keep the photo faintly underneath.
+    pub keep_photo: bool,
 }
 
 /// Moving a reference photo: gestures transform it; each gesture is one undo step.
@@ -221,6 +235,7 @@ impl CanvasApp {
             photo_panel: ui::PhotoPanel::default(),
             photo_lib: None,
             pending_photo: None,
+            pending_preview: None,
             save_thread: None,
             clear_render_cache: false,
         }
@@ -500,6 +515,8 @@ impl CanvasApp {
 
     /// A photo was picked or dropped: ask how to add it.
     pub fn offer_photo(&mut self, bytes: Vec<u8>) {
+        self.pending_preview = crate::photos::thumbnail(&bytes, 256);
+        self.photo_panel.forget_pending_preview();
         self.pending_photo = Some(bytes);
         self.photo_panel.open = true;
         self.photo_panel.picking = false;
@@ -508,44 +525,72 @@ impl CanvasApp {
         self.wants_redraw = true;
     }
 
-    /// Turns a photo into strokes (its outlines), centred on the screen like a placed photo,
-    /// with the current brush, colour and width. One undo step (plus one for the photo, if kept).
-    pub fn photo_to_drawing(&mut self, bytes: &[u8], detail: f32, keep_photo: bool) -> Result<usize, String> {
+    /// Turns a photo into strokes, centred on the screen like a placed photo:
+    /// colour patches as filled shapes (if `opts.colored`) and/or outlines drawn with the
+    /// current brush, colour and width. One undo step (plus one for the photo, if kept).
+    pub fn photo_to_drawing(&mut self, bytes: &[u8], opts: DrawingOptions) -> Result<usize, String> {
         let img = crate::photos::decode(bytes).ok_or("Nie udało się odczytać zdjęcia")?;
-        let side = (500.0 + 700.0 * detail.clamp(0.0, 1.0)) as u32;
-        let gray = img.thumbnail(side, side).to_luma8();
-        let (w, h) = (gray.width() as usize, gray.height() as usize);
-        let lines = canvas_core::trace::trace(gray.as_raw(), w, h, canvas_core::trace::TraceOptions { detail });
-        if lines.is_empty() {
-            return Err("Nie znaleziono konturów – spróbuj więcej szczegółów".into());
-        }
-        // Same placement as a photo: fitted into 80% of the screen, centred, upright.
+        let detail = opts.detail.clamp(0.0, 1.0);
         let vp = self.viewport;
-        let k = (vp[0] * 0.8 / w as f64).min(vp[1] * 0.8 / h as f64);
-        let origin = [vp[0] * 0.5 - w as f64 * k * 0.5, vp[1] * 0.5 - h as f64 * k * 0.5];
         let level = self.camera.level();
         let c = self.camera.screen_to_world([vp[0] * 0.5, vp[1] * 0.5], vp).mul_pow2(level);
         let anchor = [c.x.floor_at(0), c.y.floor_at(0)];
         let frame = self.camera.level_frame(level, vp);
-        let brush = match self.tools.brush {
-            Brush::Fill | Brush::Dotted => Brush::Pen,
-            b => b,
+        // Placement of an image of w×h px: fitted into 80% of the screen, centred, upright.
+        // Returns (screen px per image px, top-left on screen).
+        let place = |w: usize, h: usize| {
+            let k = (vp[0] * 0.8 / w as f64).min(vp[1] * 0.8 / h as f64);
+            (k, [vp[0] * 0.5 - w as f64 * k * 0.5, vp[1] * 0.5 - h as f64 * k * 0.5])
         };
-        let col = self.tools.color;
-        let width = (self.tools.width as f64 * self.pixels_per_point as f64 / frame.scale) as f32;
-        let mut strokes = Vec::with_capacity(lines.len());
-        for line in &lines {
-            let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [col.r(), col.g(), col.b(), col.a()], width);
-            s.brush = brush;
-            for p in line {
-                let sp = [origin[0] + p[0] as f64 * k, origin[1] + p[1] as f64 * k];
-                let l = frame.screen_to_local(sp, &anchor, None);
-                s.points.push(StrokePoint { x: l[0] as f32, y: l[1] as f32, pressure: 1.0 });
+        let to_local = |k: f64, origin: [f64; 2], p: [f32; 2]| {
+            let l = frame.screen_to_local([origin[0] + p[0] as f64 * k, origin[1] + p[1] as f64 * k], &anchor, None);
+            StrokePoint { x: l[0] as f32, y: l[1] as f32, pressure: 1.0 }
+        };
+        let mut strokes = Vec::new();
+
+        if opts.colored {
+            let side = (160.0 + 260.0 * detail) as u32;
+            let rgb = img.thumbnail(side, side).to_rgb8();
+            let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+            let patches = canvas_core::posterize::posterize(rgb.as_raw(), w, h, canvas_core::posterize::PosterizeOptions { detail });
+            let (k, origin) = place(w, h);
+            // The fill's own outline (≈1.2 source px wide) closes hairline gaps between patches.
+            let width = (1.2 * k / frame.scale) as f32;
+            for p in &patches {
+                let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [p.color[0], p.color[1], p.color[2], 255], width);
+                s.brush = Brush::Fill;
+                s.points = p.polygon.iter().map(|q| to_local(k, origin, *q)).collect();
+                s.refresh_cache();
+                strokes.push(s);
             }
-            s.refresh_cache();
-            strokes.push(s);
         }
-        if keep_photo {
+
+        if opts.outlines || !opts.colored {
+            let side = (500.0 + 700.0 * detail) as u32;
+            let gray = img.thumbnail(side, side).to_luma8();
+            let (w, h) = (gray.width() as usize, gray.height() as usize);
+            // Over colours, only the main outlines: less detail than a pure line drawing.
+            let line_detail = if opts.colored { detail * 0.5 } else { detail };
+            let lines = canvas_core::trace::trace(gray.as_raw(), w, h, canvas_core::trace::TraceOptions { detail: line_detail });
+            let (k, origin) = place(w, h);
+            let brush = match self.tools.brush {
+                Brush::Fill | Brush::Dotted => Brush::Pen,
+                b => b,
+            };
+            let col = self.tools.color;
+            let width = (self.tools.width as f64 * self.pixels_per_point as f64 / frame.scale) as f32;
+            for line in &lines {
+                let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [col.r(), col.g(), col.b(), col.a()], width);
+                s.brush = brush;
+                s.points = line.iter().map(|q| to_local(k, origin, *q)).collect();
+                s.refresh_cache();
+                strokes.push(s);
+            }
+        }
+        if strokes.is_empty() {
+            return Err("Nic nie wyszło – spróbuj więcej szczegółów".into());
+        }
+        if opts.keep_photo {
             let id = self.add_photo(bytes)?;
             if let Some(img) = self.doc.image_mut(id) {
                 img.opacity = 0.25;
@@ -708,8 +753,9 @@ impl CanvasApp {
             Convert => {
                 if let Some(bytes) = self.pending_photo.take() {
                     self.photo_panel.choosing = false;
-                    let (detail, keep) = (self.photo_panel.detail, self.photo_panel.keep_photo);
-                    match self.photo_to_drawing(&bytes, detail, keep) {
+                    let pp = &self.photo_panel;
+                    let opts = DrawingOptions { detail: pp.detail, colored: pp.colored, outlines: pp.outlines, keep_photo: pp.keep_photo };
+                    match self.photo_to_drawing(&bytes, opts) {
                         Ok(n) => {
                             log::info!("photo turned into {n} strokes");
                             self.photo_panel.open = false;
@@ -1025,9 +1071,19 @@ impl CanvasApp {
                 return;
             }
             let (a, mut r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
-            let photos: Vec<ui::PhotoInfo> =
-                self.doc.images().map(|i| ui::PhotoInfo { id: i.id, opacity: i.opacity, visible: i.visible }).collect();
-            photo_actions = ui::photos_window(ui.ctx(), &mut self.photo_panel, &photos, self.photo_lib.as_mut(), self.safe_top);
+            let photos: Vec<ui::PhotoInfo> = self
+                .doc
+                .images()
+                .map(|i| ui::PhotoInfo { id: i.id, opacity: i.opacity, visible: i.visible, rgba: self.decoded.get(&i.id).map(|a| &**a) })
+                .collect();
+            photo_actions = ui::photos_window(
+                ui.ctx(),
+                &mut self.photo_panel,
+                &photos,
+                self.pending_preview.as_ref(),
+                self.photo_lib.as_mut(),
+                self.safe_top,
+            );
             if self.photo_panel.open {
                 r.push(egui::Rect::EVERYTHING);
             }

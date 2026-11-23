@@ -74,8 +74,7 @@ pub fn tessellate_part(stroke: &Stroke, range: std::ops::Range<usize>, lod: u32)
         }
     } else if pts.len() > 1 {
         // Adaptive: straight runs stay one segment, curves get as many as the tolerance needs.
-        let smooth = catmull_rom(&pts, |_, flatness| segments_for_tolerance(flatness, tolerance));
-        let smooth = dedup(&smooth);
+        let smooth = dedup(&smooth_keeping_corners(&pts, tolerance));
         match stroke.brush {
             Brush::Dotted => dots(&mut out, stroke, &smooth, tolerance),
             Brush::Fill => {
@@ -86,6 +85,38 @@ pub fn tessellate_part(stroke: &Stroke, range: std::ops::Range<usize>, lod: u32)
         }
     }
     Mesh { vertices: out.vertices, indices: out.indices }
+}
+
+/// Turns sharper than this (radians) are kept as corners instead of being smoothed over.
+const CORNER_ANGLE: f32 = 1.05;
+
+/// Catmull-Rom smoothing, except at sharp corners: the curve is split there, so corners stay
+/// pointed instead of bulging (rectangles stay rectangles, deliberate zigzags stay zigzags).
+fn smooth_keeping_corners(pts: &[StrokePoint], tolerance: f32) -> Vec<StrokePoint> {
+    let n = pts.len();
+    let mut out: Vec<StrokePoint> = Vec::new();
+    let mut start = 0;
+    for i in 1..n {
+        let corner = i + 1 < n && {
+            let (a, b, c) = (pts[i - 1], pts[i], pts[i + 1]);
+            let d1 = (b.x - a.x, b.y - a.y);
+            let d2 = (c.x - b.x, c.y - b.y);
+            let cross = d1.0 * d2.1 - d1.1 * d2.0;
+            let dot = d1.0 * d2.0 + d1.1 * d2.1;
+            cross.atan2(dot).abs() > CORNER_ANGLE
+        };
+        if corner || i == n - 1 {
+            let part = catmull_rom(&pts[start..=i], |_, flatness| segments_for_tolerance(flatness, tolerance));
+            // Consecutive parts share their corner point.
+            let skip = usize::from(!out.is_empty());
+            out.extend(part.into_iter().skip(skip));
+            start = i;
+        }
+    }
+    if out.is_empty() {
+        out.extend_from_slice(pts);
+    }
+    out
 }
 
 /// Nib angles (local coordinates, y down): calligraphy pen and chisel marker.
@@ -434,5 +465,20 @@ mod tests {
         // A round cap would reach 5 units past the end along the line; a flat one doesn't.
         let m = tessellate(&line(Brush::Marker, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
         assert!(!covers(&m, [102.0, 0.0]) && covers(&m, [98.0, 0.0]));
+    }
+
+    #[test]
+    fn square_fill_keeps_its_corners() {
+        // A 100×100 square: with plain Catmull-Rom the edges would bulge past the corners.
+        let mut s = Stroke::new(1, 0, [BigInt::from(0), BigInt::from(0)], [0, 0, 0, 255], 0.1);
+        s.brush = Brush::Fill;
+        for p in [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0], [0.0, 0.0]] {
+            s.push(StrokePoint { x: p[0], y: p[1], pressure: 1.0 });
+        }
+        let m = tessellate(&s, 0);
+        for v in &m.vertices {
+            assert!(v[0] > -0.2 && v[0] < 100.2 && v[1] > -0.2 && v[1] < 100.2, "{v:?}");
+        }
+        assert!(covers(&m, [99.0, 1.0]) && covers(&m, [1.0, 99.0]), "corners filled");
     }
 }

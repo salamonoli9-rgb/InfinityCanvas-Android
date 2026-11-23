@@ -273,10 +273,34 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
 }
 
 /// One reference photo as listed in the photos window.
-pub struct PhotoInfo {
+pub struct PhotoInfo<'a> {
     pub id: u64,
     pub opacity: f32,
     pub visible: bool,
+    /// Decoded pixels, for the little preview next to the name.
+    pub rgba: Option<&'a image::RgbaImage>,
+}
+
+/// A small texture of `img` (longest side `side` px), cached under `key`.
+fn mini_texture(ctx: &egui::Context, cache: &mut HashMap<String, Option<egui::TextureHandle>>, key: String, img: &image::RgbaImage, side: u32) -> egui::TextureHandle {
+    cache
+        .entry(key.clone())
+        .or_insert(None)
+        .get_or_insert_with(|| {
+            let (w, h) = img.dimensions();
+            let k = (side as f32 / w.max(h).max(1) as f32).min(1.0);
+            let small = image::imageops::thumbnail(img, ((w as f32 * k) as u32).max(1), ((h as f32 * k) as u32).max(1));
+            let ci = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], small.as_raw());
+            ctx.load_texture(key, ci, egui::TextureOptions::LINEAR)
+        })
+        .clone()
+}
+
+/// Draws a texture fitted into a box of `side`×`side` points.
+fn mini_image(ui: &mut egui::Ui, tex: &egui::TextureHandle, side: f32) {
+    let [w, h] = tex.size().map(|v| v as f32);
+    let k = side / w.max(h);
+    ui.add(egui::Image::new((tex.id(), egui::vec2(w * k, h * k))).corner_radius(CornerRadius::same(4)));
 }
 
 pub struct PhotoPanel {
@@ -291,6 +315,17 @@ pub struct PhotoPanel {
     pub detail: f32,
     /// Keep the photo faintly under the converted drawing.
     pub keep_photo: bool,
+    /// Coloured illustration (patches) rather than outlines only.
+    pub colored: bool,
+    /// Outlines on top of the colours.
+    pub outlines: bool,
+}
+
+impl PhotoPanel {
+    /// Forgets the preview of the photo being chosen (a new one will be shown next time).
+    pub fn forget_pending_preview(&mut self) {
+        self.thumbs.remove("pending-preview");
+    }
 }
 
 impl Default for PhotoPanel {
@@ -302,7 +337,9 @@ impl Default for PhotoPanel {
             message: None,
             choosing: false,
             detail: 0.5,
-            keep_photo: true,
+            keep_photo: false,
+            colored: true,
+            outlines: true,
         }
     }
 }
@@ -328,6 +365,7 @@ pub fn photos_window(
     ctx: &egui::Context,
     st: &mut PhotoPanel,
     photos: &[PhotoInfo],
+    pending_preview: Option<&image::RgbaImage>,
     lib: Option<&mut crate::photos::PhotoLibrary>,
     safe_top: f32,
 ) -> Vec<PhotoAction> {
@@ -359,14 +397,29 @@ pub fn photos_window(
                 ui.label(egui::RichText::new(m).italics());
             }
             if st.choosing {
-                ui.label("Jak dodać to zdjęcie?");
+                ui.horizontal(|ui| {
+                    if let Some(img) = pending_preview {
+                        let tex = mini_texture(ui.ctx(), &mut st.thumbs, "pending-preview".into(), img, 160);
+                        mini_image(ui, &tex, 96.0);
+                    }
+                    ui.label("Jak dodać to zdjęcie?");
+                });
                 ui.add_space(4.0);
                 if ui.button("Do odrysowania – zdjęcie pod rysunkiem").clicked() {
                     out.push(PhotoAction::UseAsReference);
                 }
                 ui.separator();
-                ui.label("Zamień na rysunek – kontury zdjęcia jako kreski (aktualnym pędzlem i kolorem):");
+                ui.label("Zamień na rysunek (wektorowy, można go potem edytować):");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut st.colored, true, "Kolorowy");
+                    ui.selectable_value(&mut st.colored, false, "Same kontury");
+                });
                 ui.add(egui::Slider::new(&mut st.detail, 0.0..=1.0).show_value(false).text("szczegóły"));
+                if st.colored {
+                    ui.checkbox(&mut st.outlines, "kontury na wierzchu (aktualnym pędzlem i kolorem)");
+                } else {
+                    ui.label(egui::RichText::new("Kontury aktualnym pędzlem, kolorem i grubością.").small().weak());
+                }
                 ui.checkbox(&mut st.keep_photo, "zostaw blade zdjęcie pod spodem");
                 ui.horizontal(|ui| {
                     if ui.button("Zamień na rysunek").clicked() {
@@ -391,6 +444,10 @@ pub fn photos_window(
             for (i, p) in photos.iter().enumerate() {
                 ui.separator();
                 ui.horizontal(|ui| {
+                    if let Some(img) = p.rgba {
+                        let tex = mini_texture(ui.ctx(), &mut st.thumbs, format!("photo:{}", p.id), img, 128);
+                        mini_image(ui, &tex, 56.0);
+                    }
                     ui.label(format!("Zdjęcie {}", i + 1));
                     let mut o = p.opacity;
                     if ui.add(egui::Slider::new(&mut o, 0.05..=1.0).show_value(false).text("krycie")).changed() {

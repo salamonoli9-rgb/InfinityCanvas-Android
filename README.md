@@ -104,9 +104,14 @@ razem Android pyta o dostęp do zdjęć; na komputerze: obrazy z `~/Obrazy`, `~/
 - **Do odrysowania** – zdjęcie leży pod rysunkiem (gumka go nie ściera). Od razu można je
   ustawić: jeden palec przesuwa, dwa skalują i obracają, „Gotowe” lub „Wstecz” kończy. W oknie
   Zdjęcia: suwak krycia, „Przesuń / skaluj”, „Ukryj”, „Usuń”.
-- **Zamień na rysunek** – kontury zdjęcia (wykrywanie krawędzi Canny'ego) stają się zwykłymi
-  kreskami wektorowymi aktualnym pędzlem, kolorem i grubością; suwak „szczegóły” decyduje, ile
-  drobnych linii zostaje. Opcjonalnie blade zdjęcie zostaje pod spodem. Jedno „Cofnij” usuwa całość.
+- **Zamień na rysunek** – dwa style:
+  - **Kolorowy**: kolory zdjęcia zredukowane do 6–20 barw (k-średnie), plamy zamienione na
+    wypełnione kształty wektorowe (od największych do najmniejszych), opcjonalnie z konturami na
+    wierzchu – wychodzi kolorowa ilustracja,
+  - **Same kontury**: krawędzie zdjęcia (Canny) jako kreski aktualnym pędzlem, kolorem i grubością.
+
+  Suwak „szczegóły” decyduje o liczbie barw / drobnych linii. Opcjonalnie blade zdjęcie zostaje
+  pod spodem. Jedno „Cofnij” usuwa całość. W oknie Zdjęcia przy każdym zdjęciu jest miniaturka.
 
 Zdjęcie jest zapisywane w projekcie (JPEG, maks. 2048 px).
 
