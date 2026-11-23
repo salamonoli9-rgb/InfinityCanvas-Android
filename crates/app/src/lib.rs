@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod gestures;
+pub mod measure;
 pub mod grid;
 pub mod photos;
 pub mod projects;

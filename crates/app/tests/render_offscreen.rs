@@ -1230,3 +1230,36 @@ fn grid_and_snapping() {
     let i = ((200 * W + 100) * 4) as usize;
     assert_eq!(&px[i..i + 3], &plain[i..i + 3]);
 }
+
+#[test]
+fn nudge_and_measure() {
+    use infinite_canvas::ui::Tool;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 6.0;
+    draw_line(&mut app, 200.0, 100.0, 600.0);
+    // Bend: drag down from the middle of the line.
+    app.tools.tool = Tool::Nudge;
+    app.tools.nudge = 60.0;
+    draw_path(&mut app, &[[350.0, 200.0], [350.0, 260.0]], 10.0);
+    assert_eq!(app.doc.len(), 1, "bent, not added");
+    let px = gpu.frame(&mut app);
+    assert!(!dark(&px, 350, 200), "the middle moved away");
+    assert!((240..275).any(|y| dark(&px, 350, y)), "…down by about the drag");
+    assert!(dark(&px, 130, 200) && dark(&px, 580, 200), "the ends, out of reach, stay");
+    app.undo();
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 350, 200), "one undo straightens it");
+    // Measure: 300 px to the right at 100 % zoom.
+    app.tools.tool = Tool::Measure;
+    draw_path(&mut app, &[[200.0, 250.0], [500.0, 250.0]], 20.0);
+    assert_eq!(app.measurement().as_deref(), Some("300 pt  ·  0°"));
+    assert_eq!(app.doc.len(), 1);
+    // The measured line stays on the canvas: zoom in ×2 and it reads half the canvas length
+    // per screen px, i.e. the same 300 pt.
+    app.wheel_zoom([350.0, 250.0], 1.0);
+    assert_eq!(app.measurement().as_deref(), Some("300 pt  ·  0°"));
+}

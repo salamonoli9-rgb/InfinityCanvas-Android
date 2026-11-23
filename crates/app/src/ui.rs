@@ -16,6 +16,10 @@ pub enum Tool {
     Select,
     /// Tap to place vector text.
     Text,
+    /// Drag to measure a distance and an angle.
+    Measure,
+    /// Drag over strokes to bend them.
+    Nudge,
 }
 
 pub struct ToolState {
@@ -32,6 +36,8 @@ pub struct ToolState {
     pub text_size: f32,
     /// Show the canvas grid (shape guides snap to it).
     pub show_grid: bool,
+    /// Radius of the nudge tool, logical points.
+    pub nudge: f32,
     /// Sample of how each brush draws (shown in the brush menu), and the colour they were made in.
     pub previews: HashMap<Brush, egui::TextureHandle>,
     pub previews_color: Option<Color32>,
@@ -87,6 +93,7 @@ impl Default for ToolState {
             previews_color: None,
             text_size: 32.0,
             show_grid: false,
+            nudge: 40.0,
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
             eraser: 24.0,
@@ -220,6 +227,8 @@ fn size_slider(ui: &mut egui::Ui, s: &mut ToolState, label: bool) {
     let (value, range, decimals, text) = match s.tool {
         Tool::Pen | Tool::Hand | Tool::Select => (&mut s.width, 0.5..=64.0, 1, "grubość"),
         Tool::Text => (&mut s.text_size, 8.0..=240.0, 0, "rozmiar tekstu"),
+        Tool::Measure => (&mut s.width, 0.5..=64.0, 1, "grubość"),
+        Tool::Nudge => (&mut s.nudge, 8.0..=200.0, 0, "zasięg"),
         Tool::Eraser => (&mut s.eraser, 4.0..=160.0, 0, "rozmiar"),
     };
     let slider = egui::Slider::new(value, range).logarithmic(true).max_decimals(decimals);
@@ -234,6 +243,8 @@ fn history_buttons(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
 fn hand_button(ui: &mut egui::Ui, s: &mut ToolState) {
     ui.selectable_value(&mut s.tool, Tool::Select, "Zaznacz").on_hover_text("Obrysuj kreski palcem, potem przeciągnij je albo zmień rozmiar uchwytem w rogu");
     ui.selectable_value(&mut s.tool, Tool::Text, "Tekst").on_hover_text("Stuknij w płótno, żeby wpisać tekst (wektorowy)");
+    ui.selectable_value(&mut s.tool, Tool::Nudge, "Wygnij").on_hover_text("Przeciągnij po kreskach, żeby je wygiąć (zasięg – suwak)");
+    ui.selectable_value(&mut s.tool, Tool::Measure, "Miarka").on_hover_text("Przeciągnij, żeby zmierzyć odległość i kąt");
     ui.selectable_value(&mut s.tool, Tool::Hand, "Przesuń")
         .on_hover_text("Jeden palec przesuwa płótno, nic nie rysuje. Dwa stuknięcia i przeciągnięcie w górę/dół – zoom.");
 }

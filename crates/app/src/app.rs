@@ -140,6 +140,11 @@ pub struct CanvasApp {
     recording: Option<Recording>,
     recording_saving: Option<crate::video::VideoJob>,
     text_panel: ui::TextPanel,
+    /// Measured line (exact canvas points), shown until the next one or another tool.
+    measure: Option<(canvas_core::coords::WorldPos, canvas_core::coords::WorldPos)>,
+    measuring: bool,
+    /// Bending strokes in progress.
+    nudge: Option<NudgeDrag>,
     /// Selected strokes (Select tool) and what the finger is doing with them.
     selection: Vec<canvas_core::stroke::StrokeId>,
     sel_drag: Option<SelDrag>,
@@ -203,6 +208,14 @@ impl FrameStats {
             *self = Self::default();
         }
     }
+}
+
+/// One nudge drag: the strokes as they were (for undo) and their current replacements.
+struct NudgeDrag {
+    originals: std::collections::BTreeMap<canvas_core::stroke::StrokeId, Stroke>,
+    /// Current id of each original stroke.
+    current: HashMap<canvas_core::stroke::StrokeId, canvas_core::stroke::StrokeId>,
+    last: [f64; 2],
 }
 
 enum SelDrag {
@@ -404,6 +417,9 @@ impl CanvasApp {
             urgent: Vec::new(),
             content_rev: 0,
             text_panel: ui::TextPanel::default(),
+            measure: None,
+            measuring: false,
+            nudge: None,
             selection: Vec::new(),
             sel_drag: None,
             video_factory: None,
@@ -1016,8 +1032,78 @@ impl CanvasApp {
         &self.selection
     }
 
+    /// The measuring tool's label ("300 pt  ·  0°"), if something is measured.
+    pub fn measurement(&self) -> Option<String> {
+        let (wa, wb) = self.measure.as_ref()?;
+        let a = self.camera.world_to_screen(wa, self.viewport);
+        let b = self.camera.world_to_screen(wb, self.viewport);
+        let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        Some(format!(
+            "{}  ·  {:.0}°",
+            crate::measure::length_label(len, self.camera.log_zoom, self.pixels_per_point as f64),
+            crate::measure::angle_deg(a, b, self.camera.rotation)
+        ))
+    }
+
     /// The grid setting changed (it is part of the cached scene).
     pub fn toggle_grid_changed(&mut self) {
+        self.content_rev += 1;
+        self.wants_redraw = true;
+    }
+
+    /// Bends the strokes under the nudge circle by the pointer's movement, with a smooth
+    /// falloff towards the circle's edge.
+    fn nudge_move(&mut self, pos: [f64; 2]) {
+        let Some(mut n) = self.nudge.take() else { return };
+        let d = [pos[0] - n.last[0], pos[1] - n.last[1]];
+        if d[0].hypot(d[1]) < 0.5 {
+            self.nudge = Some(n);
+            return;
+        }
+        let r = self.tools.nudge as f64 * self.pixels_per_point as f64;
+        let c = n.last;
+        let ids: Vec<canvas_core::stroke::StrokeId> =
+            self.doc.query(&self.camera, self.viewport, [c[0] - r, c[1] - r, c[0] + r, c[1] + r]).iter().map(|v| v.id).collect();
+        for id in ids {
+            let Some(s) = self.doc.get(id) else { continue };
+            if s.is_eraser() {
+                continue;
+            }
+            let f = self.camera.level_frame(s.level, self.viewport);
+            let cl = f.screen_to_local(c, &s.anchor, s.cache.anchor_fast);
+            let rl = r / f.scale;
+            let dl = f.screen_vec_to_local(d);
+            let mut moved = false;
+            let mut points = s.points.clone();
+            for p in &mut points {
+                let dist = (p.x as f64 - cl[0]).hypot(p.y as f64 - cl[1]);
+                if dist < rl {
+                    let t = dist / rl;
+                    let w = (1.0 - t * t).powi(2);
+                    p.x += (dl[0] * w) as f32;
+                    p.y += (dl[1] * w) as f32;
+                    moved = true;
+                }
+            }
+            if !moved {
+                continue;
+            }
+            let old = self.doc.remove(id).expect("exists");
+            // The first time a stroke is bent, keep it as it was for undo.
+            let original = n.current.iter().find(|(_, cur)| **cur == id).map(|(o, _)| *o).unwrap_or(id);
+            if original == id {
+                n.originals.entry(id).or_insert_with(|| old.clone());
+            }
+            let mut t = old;
+            t.id = self.doc.alloc_id();
+            t.points = points;
+            t.refresh_cache();
+            n.current.insert(original, t.id);
+            self.urgent.push(t.id);
+            self.doc.insert(t);
+        }
+        n.last = pos;
+        self.nudge = Some(n);
         self.content_rev += 1;
         self.wants_redraw = true;
     }
@@ -1566,6 +1652,73 @@ impl CanvasApp {
         if self.tools.tool == Tool::Select && self.apply_select(&g) {
             return;
         }
+        if self.tools.tool == Tool::Measure {
+            let snap = |app: &Self, p: [f64; 2]| {
+                if app.tools.show_grid { crate::grid::Grid::new(&app.camera, app.viewport, app.pixels_per_point as f64).snap(p) } else { p }
+            };
+            match g {
+                Gesture::StrokeBegin { pos, .. } => {
+                    let w = self.camera.screen_to_world(snap(self, pos), self.viewport);
+                    self.measure = Some((w.clone(), w));
+                    self.measuring = true;
+                    self.wants_redraw = true;
+                    return;
+                }
+                Gesture::StrokeMove { pos, .. } => {
+                    let w = self.camera.screen_to_world(snap(self, pos), self.viewport);
+                    if let Some(m) = self.measure.as_mut() {
+                        m.1 = w;
+                    }
+                    self.wants_redraw = true;
+                    return;
+                }
+                Gesture::StrokeEnd | Gesture::StrokeCancel => {
+                    self.measuring = false;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if self.tools.tool == Tool::Nudge {
+            match g {
+                Gesture::StrokeBegin { pos, .. } => {
+                    self.nudge = Some(NudgeDrag { originals: Default::default(), current: HashMap::new(), last: pos });
+                    self.eraser_cursor = Some(pos);
+                    self.wants_redraw = true;
+                    return;
+                }
+                Gesture::StrokeMove { pos, .. } => {
+                    self.nudge_move(pos);
+                    self.eraser_cursor = Some(pos);
+                    return;
+                }
+                Gesture::StrokeEnd => {
+                    self.eraser_cursor = None;
+                    if let Some(n) = self.nudge.take()
+                        && !n.originals.is_empty()
+                    {
+                        let added: Vec<Stroke> = n.current.values().filter_map(|id| self.doc.get(*id).cloned()).collect();
+                        self.history.record(Action::Replace { removed: n.originals.into_values().collect(), added });
+                        self.changed();
+                    }
+                    return;
+                }
+                Gesture::StrokeCancel => {
+                    self.eraser_cursor = None;
+                    if let Some(n) = self.nudge.take() {
+                        for id in n.current.values() {
+                            self.doc.remove(*id);
+                        }
+                        for s in n.originals.into_values() {
+                            self.doc.insert(s);
+                        }
+                        self.content_rev += 1;
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         if self.tools.tool == Tool::Text {
             match g {
                 Gesture::StrokeBegin { pos, .. } => {
@@ -1981,6 +2134,33 @@ impl CanvasApp {
                 self.selection.clear();
                 self.sel_drag = None;
             }
+            if self.tools.tool != Tool::Measure {
+                self.measure = None;
+            }
+            if let Some((wa, wb)) = &self.measure {
+                let ppp = self.pixels_per_point;
+                let a = self.camera.world_to_screen(wa, self.viewport);
+                let b = self.camera.world_to_screen(wb, self.viewport);
+                let (pa, pb) = (egui::pos2(a[0] as f32 / ppp, a[1] as f32 / ppp), egui::pos2(b[0] as f32 / ppp, b[1] as f32 / ppp));
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("measure")));
+                let col = egui::Color32::from_rgb(230, 80, 20);
+                painter.line_segment([pa, pb], egui::Stroke::new(3.0, egui::Color32::WHITE));
+                painter.line_segment([pa, pb], egui::Stroke::new(1.5, col));
+                for p in [pa, pb] {
+                    painter.circle(p, 4.0, egui::Color32::WHITE, egui::Stroke::new(1.5, col));
+                }
+                let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+                let label = format!(
+                    "{}  ·  {:.0}°",
+                    crate::measure::length_label(len, self.camera.log_zoom, ppp as f64),
+                    crate::measure::angle_deg(a, b, self.camera.rotation)
+                );
+                let at = pb + egui::vec2(10.0, -22.0);
+                let galley = painter.layout_no_wrap(label, egui::FontId::proportional(15.0), egui::Color32::BLACK);
+                let rect = egui::Rect::from_min_size(at, galley.size()).expand(5.0);
+                painter.rect_filled(rect, 6.0, egui::Color32::from_white_alpha(235));
+                painter.galley(at, galley, egui::Color32::BLACK);
+            }
             let ppp = self.pixels_per_point;
             let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("selection")));
             let blue = egui::Color32::from_rgb(30, 120, 230);
@@ -2011,7 +2191,7 @@ impl CanvasApp {
                 let ppp = self.pixels_per_point;
                 let c = egui::pos2(pos[0] as f32 / ppp, pos[1] as f32 / ppp);
                 let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("eraser")));
-                let r = self.tools.eraser * 0.5;
+                let r = if self.tools.tool == Tool::Nudge { self.tools.nudge } else { self.tools.eraser * 0.5 };
                 p.circle_stroke(c, r, egui::Stroke::new(1.5, egui::Color32::from_gray(255)));
                 p.circle_stroke(c, r, egui::Stroke::new(0.8, egui::Color32::from_gray(60)));
             }
