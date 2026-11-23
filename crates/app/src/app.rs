@@ -152,6 +152,8 @@ pub struct CanvasApp {
     content_rev: u64,
     /// What the renderer's scene cache holds.
     cache: Option<CacheInfo>,
+    /// How many times the whole scene was rendered (for tests / profiling).
+    pub scene_renders: u64,
     /// Camera of the previous frame and when it last moved.
     last_cam: Option<Camera>,
     last_move: Instant,
@@ -427,6 +429,7 @@ impl CanvasApp {
             recording: None,
             recording_saving: None,
             cache: None,
+            scene_renders: 0,
             last_cam: None,
             last_move: Instant::now(),
             flight: None,
@@ -1091,8 +1094,11 @@ impl CanvasApp {
             let old = self.doc.remove(id).expect("exists");
             // The first time a stroke is bent, keep it as it was for undo.
             let original = n.current.iter().find(|(_, cur)| **cur == id).map(|(o, _)| *o).unwrap_or(id);
-            if original == id {
-                n.originals.entry(id).or_insert_with(|| old.clone());
+            if original == id && !n.originals.contains_key(&id) {
+                n.originals.insert(id, old.clone());
+                // A new stroke is being bent: the cached scene must be redrawn without it
+                // (bent strokes are drawn on top of the cache while dragging).
+                self.content_rev += 1;
             }
             let mut t = old;
             t.id = self.doc.alloc_id();
@@ -1104,7 +1110,6 @@ impl CanvasApp {
         }
         n.last = pos;
         self.nudge = Some(n);
-        self.content_rev += 1;
         self.wants_redraw = true;
     }
 
@@ -2350,6 +2355,10 @@ impl CanvasApp {
             let tq = Instant::now();
             let mut visible = self.doc.query(&self.camera, cvp, [0.0, 0.0, cvp[0], cvp[1]]);
             query_time = tq.elapsed().as_secs_f64();
+            // Strokes being bent are drawn on top of the cache, not into it.
+            if let Some(n) = &self.nudge {
+                visible.retain(|v| !n.current.values().any(|id| *id == v.id));
+            }
             // Selection being moved / scaled: preview through the render transform (the cache
             // has the margin m around the screen, so screen points shift by m).
             if let Some(x) = sel_xform {
@@ -2398,6 +2407,7 @@ impl CanvasApp {
                     textures: Default::default(),
                 },
             );
+            self.scene_renders += 1;
             self.cache = Some(CacheInfo {
                 cam: self.camera.clone(),
                 vp: cvp,
@@ -2445,18 +2455,28 @@ impl CanvasApp {
             }
         });
         let capture_active = active.clone();
+        // Strokes being bent: only they are drawn each frame, over the cached scene.
+        let overlay: Vec<canvas_core::document::VisibleStroke> = match &self.nudge {
+            Some(n) if canvas && !n.current.is_empty() => self
+                .doc
+                .query(&self.camera, vp, [0.0, 0.0, vp[0], vp[1]])
+                .into_iter()
+                .filter(|v| n.current.values().any(|id| *id == v.id))
+                .collect(),
+            _ => Vec::new(),
+        };
         let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
         renderer.render_target(
             target,
             FrameInput {
-                visible: &[],
+                visible: &overlay,
                 doc: &self.doc,
                 active,
                 scene,
                 images: &[],
                 grid: &[],
                 layer_opacity: &layer_opacity,
-                urgent: &[],
+                urgent: &urgent,
                 log_zoom: self.camera.log_zoom,
                 rotation: self.camera.rot(),
                 background: BACKGROUND,

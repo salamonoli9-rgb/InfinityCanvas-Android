@@ -1263,3 +1263,39 @@ fn nudge_and_measure() {
     app.wheel_zoom([350.0, 250.0], 1.0);
     assert_eq!(app.measurement().as_deref(), Some("300 pt  ·  0°"));
 }
+
+#[test]
+fn nudging_redraws_only_the_bent_strokes() {
+    use infinite_canvas::ui::Tool;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 3.0;
+    // A busy drawing: many short strokes, plus one line to bend.
+    for i in 0..150 {
+        let y = 125.0 + (i % 30) as f64 * 5.5;
+        let x = 20.0 + (i / 30) as f64 * 60.0;
+        draw_line(&mut app, y, x, x + 40.0);
+    }
+    app.tools.width = 6.0;
+    draw_line(&mut app, 220.0, 400.0, 700.0);
+    gpu.frame(&mut app);
+    app.tools.tool = Tool::Nudge;
+    app.tools.nudge = 50.0;
+    let before = app.scene_renders;
+    mouse(&mut app, Phase::Down, [550.0, 220.0], 0.0);
+    for k in 1..=20 {
+        mouse(&mut app, Phase::Move, [550.0, 220.0 + k as f64 * 2.5], k as f64 * 0.016);
+        gpu.frame_once(&mut app);
+    }
+    let px = gpu.frame_once(&mut app);
+    let during = app.scene_renders - before;
+    assert!(during <= 3, "the scene was redrawn {during} times during the drag");
+    assert!((255..285).any(|y| dark(&px, 550, y)), "the bent part shows mid-drag");
+    assert!(dark(&px, 40, 125) && dark(&px, 420, 220), "the rest of the drawing is still there");
+    mouse(&mut app, Phase::Up, [550.0, 270.0], 1.0);
+    let px = gpu.frame(&mut app);
+    assert!((255..285).any(|y| dark(&px, 550, y)) && !dark(&px, 550, 220));
+}

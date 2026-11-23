@@ -963,10 +963,17 @@ pub fn text_window(ctx: &egui::Context, st: &mut TextPanel, size: &mut f32, safe
 /// While recording: a red button with the time; tapping it stops the recording.
 pub fn recording_badge(ctx: &egui::Context, seconds: f64, safe_top: f32) -> (bool, Rect) {
     let mut stop = false;
-    let r = egui::Area::new(egui::Id::unique("recording")).anchor(Align2::RIGHT_TOP, [-8.0, 8.0 + safe_top]).show(ctx, |ui| {
+    // Bottom-right, above everything: the toolbar must never cover it.
+    let _ = safe_top;
+    let r = egui::Area::new(egui::Id::unique("recording"))
+        .order(egui::Order::Foreground)
+        .anchor(Align2::RIGHT_BOTTOM, [-12.0, -84.0])
+        .show(ctx, |ui| {
         let s = seconds as u64;
         let text = egui::RichText::new(format!("● Nagrywanie {}:{:02} – zakończ", s / 60, s % 60)).color(Color32::WHITE).strong();
-        stop = ui.add(egui::Button::new(text).fill(Color32::from_rgb(0xd3, 0x2f, 0x2f))).clicked();
+        stop = ui
+            .add(egui::Button::new(text.size(16.0)).fill(Color32::from_rgb(0xd3, 0x2f, 0x2f)).min_size(egui::vec2(0.0, 48.0)).corner_radius(CornerRadius::same(24)))
+            .clicked();
     });
     (stop, r.response.rect)
 }
