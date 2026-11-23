@@ -1,7 +1,9 @@
 //! Stroke → triangle mesh in level-local coordinates (lyon, variable width, round caps).
+//!
+//! Each vertex is `[x, y, intensity]`: intensity multiplies the ink's alpha (pencil pressure).
 
 use crate::smoothing::{catmull_rom, segments_for_tolerance};
-use crate::stroke::{Stroke, StrokePoint, pressure_factor};
+use crate::stroke::{Brush, Stroke, StrokePoint};
 use lyon_tessellation::geom::point;
 use lyon_tessellation::path::builder::Build;
 use lyon_tessellation::path::traits::PathBuilder;
@@ -17,7 +19,7 @@ const MAX_VERTICES: usize = 300_000;
 
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
-    pub vertices: Vec<[f32; 2]>,
+    pub vertices: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
 }
 
@@ -63,42 +65,138 @@ pub fn tessellate_part(stroke: &Stroke, range: std::ops::Range<usize>, lod: u32)
         lod -= 1;
     }
     let tolerance = 0.2 / (1u32 << lod) as f32;
-    let mut out: VertexBuffers<[f32; 2], u32> = VertexBuffers::new();
+    let mut out: VertexBuffers<[f32; 3], u32> = VertexBuffers::new();
 
-    if pts.len() == 1 {
-        let p = pts[0];
-        let r = stroke.radius_at(&p).max(0.05);
-        let mut fill = FillTessellator::new();
-        let _ = fill.tessellate_circle(
-            point(p.x, p.y),
-            r,
-            &FillOptions::tolerance(tolerance),
-            &mut BuffersBuilder::new(&mut out, |v: FillVertex| v.position().to_array()),
-        );
+    if pts.len() == 1 || (stroke.brush == Brush::Fill && pts.len() < 3) {
+        let p = pts.last().copied().unwrap_or(StrokePoint { x: 0.0, y: 0.0, pressure: 1.0 });
+        if !pts.is_empty() {
+            circle(&mut out, p, stroke.radius_at(&p).max(0.025), stroke.intensity(p.pressure), tolerance);
+        }
     } else if pts.len() > 1 {
         // Adaptive: straight runs stay one segment, curves get as many as the tolerance needs.
         let smooth = catmull_rom(&pts, |_, flatness| segments_for_tolerance(flatness, tolerance));
         let smooth = dedup(&smooth);
-        let opts = StrokeOptions::tolerance(tolerance)
-            .with_line_width(stroke.width.max(0.05))
-            .with_variable_line_width(0)
-            .with_start_cap(if caps[0] { LineCap::Butt } else { LineCap::Round })
-            .with_end_cap(if caps[1] { LineCap::Butt } else { LineCap::Round })
-            .with_line_join(LineJoin::Round);
-        let mut tess = StrokeTessellator::new();
-        let mut bb = BuffersBuilder::new(&mut out, |v: StrokeVertex| v.position().to_array());
-        let mut b = tess.builder_with_attributes(1, &opts, &mut bb);
-        let first = smooth[0];
-        b.begin(point(first.x, first.y), &[pressure_factor(first.pressure)]);
-        for p in &smooth[1..] {
-            b.line_to(point(p.x, p.y), &[pressure_factor(p.pressure)]);
-        }
-        b.end(false);
-        if let Err(e) = b.build() {
-            log::warn!("tessellation of stroke {} failed: {e:?}", stroke.id);
+        match stroke.brush {
+            Brush::Dotted => dots(&mut out, stroke, &smooth, tolerance),
+            Brush::Fill => {
+                fill_polygon(&mut out, stroke, &smooth, tolerance);
+                ribbon(&mut out, stroke, &smooth, tolerance, caps, true);
+            }
+            _ => ribbon(&mut out, stroke, &smooth, tolerance, caps, false),
         }
     }
     Mesh { vertices: out.vertices, indices: out.indices }
+}
+
+/// Nib angles (local coordinates, y down): calligraphy pen and chisel marker.
+const FOUNTAIN_NIB: f32 = -std::f32::consts::FRAC_PI_4;
+const MARKER_NIB: f32 = -1.0;
+
+/// Width multiplier of a flat nib for the direction of travel `dir`: thin along the nib.
+fn nib(dir: f32, nib_angle: f32, thinnest: f32) -> f32 {
+    thinnest + (1.0 - thinnest) * (dir - nib_angle).sin().abs()
+}
+
+/// The stroke body: lyon variable-width stroke with per-vertex [width factor, intensity].
+fn ribbon(
+    out: &mut VertexBuffers<[f32; 3], u32>,
+    stroke: &Stroke,
+    pts: &[StrokePoint],
+    tolerance: f32,
+    flat: [bool; 2],
+    outline: bool,
+) {
+    let n = pts.len();
+    // Direction of travel over a few neighbours: single segments wobble (esp. at the start,
+    // where the input filter settles), and direction-dependent widths would bulge there.
+    let dir = |i: usize| {
+        let (a, b) = (pts[i.saturating_sub(3)], pts[(i + 3).min(n - 1)]);
+        (b.y - a.y).atan2(b.x - a.x)
+    };
+    let attrs = |i: usize| -> [f32; 2] {
+        let p = pts[i];
+        let w = if outline { 1.0 } else { stroke.width_factor(p.pressure) };
+        let w = match stroke.brush {
+            Brush::Fountain => w * nib(dir(i), FOUNTAIN_NIB, 0.2),
+            Brush::Marker => w * nib(dir(i), MARKER_NIB, 0.3),
+            _ => w,
+        };
+        [w, stroke.intensity(p.pressure)]
+    };
+    let cap = |f: bool| if f || stroke.brush == Brush::Marker { LineCap::Butt } else { LineCap::Round };
+    let opts = StrokeOptions::tolerance(tolerance)
+        .with_line_width(stroke.width.max(0.05))
+        .with_variable_line_width(0)
+        .with_start_cap(cap(flat[0]))
+        .with_end_cap(cap(flat[1]))
+        .with_line_join(LineJoin::Round);
+    let mut tess = StrokeTessellator::new();
+    let mut bb = BuffersBuilder::new(out, |mut v: StrokeVertex| {
+        let p = v.position();
+        let a = v.interpolated_attributes();
+        [p.x, p.y, a[1]]
+    });
+    let mut b = tess.builder_with_attributes(2, &opts, &mut bb);
+    b.begin(point(pts[0].x, pts[0].y), &attrs(0));
+    for (i, p) in pts.iter().enumerate().skip(1) {
+        b.line_to(point(p.x, p.y), &attrs(i));
+    }
+    b.end(outline);
+    if let Err(e) = b.build() {
+        log::warn!("tessellation of stroke {} failed: {e:?}", stroke.id);
+    }
+}
+
+fn circle(out: &mut VertexBuffers<[f32; 3], u32>, c: StrokePoint, r: f32, intensity: f32, tolerance: f32) {
+    let mut fill = FillTessellator::new();
+    let _ = fill.tessellate_circle(
+        point(c.x, c.y),
+        r,
+        &FillOptions::tolerance(tolerance.min(r * 0.25)),
+        &mut BuffersBuilder::new(out, |v: FillVertex| {
+            let p = v.position();
+            [p.x, p.y, intensity]
+        }),
+    );
+}
+
+/// Round dots every ~2.2 widths along the path (arc length), the first one at the start.
+fn dots(out: &mut VertexBuffers<[f32; 3], u32>, stroke: &Stroke, pts: &[StrokePoint], tolerance: f32) {
+    let spacing = (stroke.width * 2.2).max(0.1);
+    let mut next = 0.0f32; // arc length of the next dot
+    let mut walked = 0.0f32;
+    let mut count = 0;
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        while next <= walked + len && count < 100_000 {
+            let t = if len > 0.0 { (next - walked) / len } else { 0.0 };
+            let p = StrokePoint { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, pressure: a.pressure + (b.pressure - a.pressure) * t };
+            circle(out, p, stroke.radius_at(&p), 1.0, tolerance);
+            next += spacing;
+            count += 1;
+        }
+        walked += len;
+    }
+}
+
+/// The area enclosed by the (implicitly closed) path, non-zero rule.
+fn fill_polygon(out: &mut VertexBuffers<[f32; 3], u32>, stroke: &Stroke, pts: &[StrokePoint], tolerance: f32) {
+    let mut fill = FillTessellator::new();
+    let opts = FillOptions::tolerance(tolerance).with_fill_rule(lyon_tessellation::FillRule::NonZero);
+    let mut bb = BuffersBuilder::new(out, |v: FillVertex| {
+        let p = v.position();
+        [p.x, p.y, 1.0]
+    });
+    let mut b = fill.builder(&opts, &mut bb);
+    b.begin(point(pts[0].x, pts[0].y));
+    for p in &pts[1..] {
+        b.line_to(point(p.x, p.y));
+    }
+    b.end(true);
+    if let Err(e) = b.build() {
+        log::warn!("fill of stroke {} failed: {e:?}", stroke.id);
+    }
 }
 
 /// Max deviation (local units, ~px at LOD 0) allowed when simplifying input points.
@@ -230,5 +328,111 @@ mod tests {
                 .fold(f32::MAX, f32::min);
             assert!(d <= 0.2501, "{d}");
         }
+    }
+
+    /// Area covered by a mesh (sum of triangle areas; overlaps counted twice).
+    fn area(m: &Mesh) -> f32 {
+        m.indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (m.vertices[t[0] as usize], m.vertices[t[1] as usize], m.vertices[t[2] as usize]);
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs()
+            })
+            .sum()
+    }
+
+    /// Does the mesh cover point `p`?
+    fn covers(m: &Mesh, p: [f32; 2]) -> bool {
+        m.indices.as_chunks::<3>().0.iter().any(|t| {
+            let v = [m.vertices[t[0] as usize], m.vertices[t[1] as usize], m.vertices[t[2] as usize]];
+            let s = |a: [f32; 3], b: [f32; 3]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+            let (d0, d1, d2) = (s(v[0], v[1]), s(v[1], v[2]), s(v[2], v[0]));
+            (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
+        })
+    }
+
+    fn line(brush: Brush, from: [f32; 2], to: [f32; 2], pressure: f32) -> Stroke {
+        let mut s = Stroke::new(1, 0, [BigInt::from(0), BigInt::from(0)], [0, 0, 0, 255], 10.0);
+        s.brush = brush;
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            s.push(StrokePoint { x: from[0] + (to[0] - from[0]) * t, y: from[1] + (to[1] - from[1]) * t, pressure });
+        }
+        s
+    }
+
+    #[test]
+    fn every_brush_makes_a_mesh_inside_its_bbox() {
+        for brush in Brush::ALL {
+            let mut s = stroke(40);
+            s.brush = brush;
+            s.refresh_cache();
+            let m = tessellate(&s, 2);
+            assert!(!m.is_empty(), "{brush:?}");
+            let bb = s.cache.bbox;
+            for v in &m.vertices {
+                assert!(v[0] >= bb[0] - 0.5 && v[0] <= bb[2] + 0.5 && v[1] >= bb[1] - 0.5 && v[1] <= bb[3] + 0.5, "{brush:?}");
+                assert!(v[2] > 0.0 && v[2] <= 1.0, "{brush:?} intensity");
+            }
+        }
+    }
+
+    #[test]
+    fn fountain_pen_follows_direction() {
+        // Nib at -45°: moving up-right (along the nib) is thin, down-right is thick.
+        let along = tessellate(&line(Brush::Fountain, [0.0, 100.0], [100.0, 0.0], 1.0), 0);
+        let across = tessellate(&line(Brush::Fountain, [0.0, 0.0], [100.0, 100.0], 1.0), 0);
+        assert!(area(&across) > 3.0 * area(&along), "{} vs {}", area(&across), area(&along));
+    }
+
+    #[test]
+    fn pencil_pressure_sets_intensity() {
+        let light = tessellate(&line(Brush::SoftPencil, [0.0, 0.0], [100.0, 0.0], 0.1), 0);
+        let hard = tessellate(&line(Brush::SoftPencil, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
+        let avg = |m: &Mesh| m.vertices.iter().map(|v| v[2]).sum::<f32>() / m.vertices.len() as f32;
+        assert!(avg(&light) < 0.45 && avg(&hard) > 0.95);
+    }
+
+    #[test]
+    fn dotted_spacing() {
+        // 100 units long, width 10 → a dot every 22 units: at 0, 22, 44, 66, 88.
+        let m = tessellate(&line(Brush::Dotted, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
+        for x in [0.0, 22.0, 44.0, 66.0, 88.0] {
+            assert!(covers(&m, [x, 0.0]), "dot at {x}");
+        }
+        assert!(!covers(&m, [11.0, 0.0]) && !covers(&m, [99.0, 0.0]));
+    }
+
+    #[test]
+    fn fill_covers_the_enclosed_area() {
+        let mut s = Stroke::new(1, 0, [BigInt::from(0), BigInt::from(0)], [0, 0, 0, 255], 2.0);
+        s.brush = Brush::Fill;
+        for i in 0..64 {
+            let a = i as f32 / 64.0 * std::f32::consts::TAU;
+            s.push(StrokePoint { x: 50.0 * a.cos(), y: 50.0 * a.sin(), pressure: 1.0 });
+        }
+        let m = tessellate(&s, 0);
+        assert!(covers(&m, [0.0, 0.0]) && covers(&m, [30.0, -20.0]));
+        assert!(!covers(&m, [60.0, 0.0]));
+    }
+
+    #[test]
+    fn constant_intensity_stays_constant() {
+        for brush in [Brush::Marker, Brush::Pen, Brush::Fountain] {
+            let mut s = stroke(40);
+            s.brush = brush;
+            let m = tessellate(&s, 2);
+            let bad: Vec<f32> = m.vertices.iter().map(|v| v[2]).filter(|i| (i - 1.0).abs() > 1e-4).collect();
+            assert!(bad.is_empty(), "{brush:?}: {:?}", &bad[..bad.len().min(8)]);
+        }
+    }
+
+    #[test]
+    fn marker_has_flat_ends() {
+        // A round cap would reach 5 units past the end along the line; a flat one doesn't.
+        let m = tessellate(&line(Brush::Marker, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
+        assert!(!covers(&m, [102.0, 0.0]) && covers(&m, [98.0, 0.0]));
     }
 }

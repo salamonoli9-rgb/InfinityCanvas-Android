@@ -16,6 +16,9 @@ pub const MSAA: u32 = 4;
 /// Up to this many binary orders of magnification the GPU f32 path is used.
 const GPU_MAX_REL: f64 = 6.0;
 const CHUNK_VERTICES: u64 = 1 << 20;
+/// Bytes per vertex: local x, y and ink intensity.
+const VERTEX_SIZE: u64 = 12;
+const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 const CHUNK_INDICES: u64 = 3 << 20;
 /// Meshes unused for this many frames are evicted.
 const EVICT_FRAMES: u64 = 600;
@@ -29,12 +32,15 @@ struct Instance {
     /// Scale × (cos, sin) of the view rotation: screen = offset + R·local·scale.
     rs: [f32; 2],
     color: [f32; 4],
+    /// Paper grain: strength, 1 / cell size (local units), unused, unused.
+    params: [f32; 4],
 }
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 4] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 1 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 3 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 4 },
 ];
 
 #[repr(C)]
@@ -196,6 +202,7 @@ pub struct FrameInput<'a> {
 struct Targets {
     size: [u32; 2],
     msaa: wgpu::TextureView,
+    stencil: wgpu::TextureView,
     layer: wgpu::TextureView,
     composite: wgpu::BindGroup,
 }
@@ -274,7 +281,27 @@ impl Renderer {
         });
         // Two variants: opaque strokes are drawn without blending, which lets tile-based GPUs
         // (Mali Forward Pixel Kill, PowerVR HSR) skip fragments hidden by later strokes.
-        let make_pipeline = |label, blend| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        // Translucent strokes use the stencil buffer so that a stroke overlapping itself (joins,
+        // frozen parts while drawing) is blended only once per pixel. Each translucent stroke
+        // gets its own reference value; a pixel already at that value is skipped.
+        let no_stencil = wgpu::DepthStencilState {
+            format: STENCIL_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: Default::default(),
+        };
+        let once = wgpu::StencilFaceState {
+            compare: wgpu::CompareFunction::NotEqual,
+            fail_op: wgpu::StencilOperation::Keep,
+            depth_fail_op: wgpu::StencilOperation::Keep,
+            pass_op: wgpu::StencilOperation::Replace,
+        };
+        let stencil_once = wgpu::DepthStencilState {
+            stencil: wgpu::StencilState { front: once, back: once, read_mask: 0xff, write_mask: 0xff },
+            ..no_stencil.clone()
+        };
+        let make_pipeline = |label, blend, ds: &wgpu::DepthStencilState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -283,9 +310,9 @@ impl Renderer {
                 compilation_options: Default::default(),
                 buffers: &[
                     Some(wgpu::VertexBufferLayout {
-                        array_stride: 8,
+                        array_stride: VERTEX_SIZE,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
                     }),
                     Some(wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<Instance>() as u64,
@@ -305,20 +332,20 @@ impl Renderer {
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(ds.clone()),
             multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
             multiview_mask: None,
             cache: None,
         });
-        let pipeline = make_pipeline("stroke", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
-        let pipeline_opaque = make_pipeline("stroke opaque", None);
+        let pipeline = make_pipeline("stroke", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING), &stencil_once);
+        let pipeline_opaque = make_pipeline("stroke opaque", None, &no_stencil);
         // dst = dst · (1 − coverage): an eraser of alpha 1 removes everything under it.
         let erase = wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::Zero,
             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
             operation: wgpu::BlendOperation::Add,
         };
-        let pipeline_erase = make_pipeline("stroke erase", Some(wgpu::BlendState { color: erase, alpha: erase }));
+        let pipeline_erase = make_pipeline("stroke erase", Some(wgpu::BlendState { color: erase, alpha: erase }), &no_stencil);
 
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite"),
@@ -386,9 +413,9 @@ impl Renderer {
             chunks: Vec::new(),
             meshes: HashMap::new(),
             cpu_meshes: HashMap::new(),
-            instance_buf: mk("instances", 1024 * 32, vu),
+            instance_buf: mk("instances", 1024 * std::mem::size_of::<Instance>() as u64, vu),
             instance_cap: 1024,
-            dyn_vbuf: mk("dyn v", 65536 * 8, vu),
+            dyn_vbuf: mk("dyn v", 65536 * VERTEX_SIZE, vu),
             dyn_ibuf: mk("dyn i", 65536 * 4, iu),
             dyn_v_cap: 65536,
             dyn_i_cap: 65536,
@@ -411,13 +438,21 @@ impl Renderer {
         [conv(c[0]) * a, conv(c[1]) * a, conv(c[2]) * a, a]
     }
 
-    /// Instance colour and how to draw it. Erasers draw with alpha 1 and clear the layer.
-    fn paint(&self, s: &Stroke) -> ([f32; 4], Kind) {
+    /// Instance colour, grain parameters and how to draw it. Erasers draw with alpha 1 and
+    /// clear the layer.
+    fn paint(&self, s: &Stroke) -> ([f32; 4], [f32; 4], Kind) {
         if s.is_eraser() {
-            return ([0.0, 0.0, 0.0, 1.0], Kind::Erase);
+            return ([0.0, 0.0, 0.0, 1.0], [0.0; 4], Kind::Erase);
         }
-        let c = self.color(s.color);
-        (c, if c[3] >= 1.0 { Kind::Opaque } else { Kind::Blend })
+        let mut c = s.color;
+        c[3] = (c[3] as f32 * s.brush.opacity()).round() as u8;
+        let color = self.color(c);
+        let params = match s.brush.grain() {
+            Some((strength, cell)) => [strength, 1.0 / cell, 0.0, 0.0],
+            None => [0.0; 4],
+        };
+        let kind = if color[3] >= 1.0 && s.brush.is_solid() { Kind::Opaque } else { Kind::Blend };
+        (color, params, kind)
     }
 
     fn upload_mesh(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<(usize, i32, u32)> {
@@ -435,7 +470,7 @@ impl Renderer {
                 let chunk = Chunk {
                     vbuf: device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("mesh v"),
-                        size: v_cap * 8,
+                        size: v_cap * VERTEX_SIZE,
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
@@ -456,7 +491,7 @@ impl Renderer {
             }
         };
         let c = &mut self.chunks[ci];
-        queue.write_buffer(&c.vbuf, c.v_used * 8, bytemuck::cast_slice(&mesh.vertices));
+        queue.write_buffer(&c.vbuf, c.v_used * VERTEX_SIZE, bytemuck::cast_slice(&mesh.vertices));
         // Index buffer writes must be 4-byte aligned in size: u32 indices always are.
         queue.write_buffer(&c.ibuf, c.i_used * 4, bytemuck::cast_slice(&mesh.indices));
         let r = (ci, c.v_used as i32, c.i_used as u32);
@@ -621,7 +656,7 @@ impl Renderer {
         let mut instances: Vec<Instance> = Vec::with_capacity(input.visible.len() + 1);
         let mut kinds: Vec<Kind> = Vec::with_capacity(input.visible.len() + 1);
         let mut draws: Vec<Draw> = Vec::with_capacity(input.visible.len() + 1);
-        let mut dyn_v: Vec<[f32; 2]> = Vec::new();
+        let mut dyn_v: Vec<[f32; 3]> = Vec::new();
         let mut dyn_i: Vec<u32> = Vec::new();
         let started = Instant::now();
 
@@ -629,7 +664,7 @@ impl Renderer {
             let Some(stroke) = input.doc.get(v.id) else { continue };
             let rel = input.log_zoom - v.level as f64;
             let lod = lod_for(v.level, input.log_zoom);
-            let (color, kind) = self.paint(stroke);
+            let (color, grain, kind) = self.paint(stroke);
             if rel <= GPU_MAX_REL {
                 let key = (v.id, lod);
                 let cached = match self.meshes.get_mut(&key) {
@@ -659,7 +694,7 @@ impl Renderer {
                 };
                 if let Some(m) = cached {
                     let instance = instances.len() as u32;
-                    instances.push(Instance { offset: f32x2(v.offset), rs: rs(v.scale), color });
+                    instances.push(Instance { offset: f32x2(v.offset), rs: rs(v.scale), color, params: grain });
                     kinds.push(kind);
                     draws.push(Draw::Cached {
                         chunk: m.chunk,
@@ -687,7 +722,9 @@ impl Renderer {
                 push_cpu_path(&mesh, v.offset, v.scale, rot, vp, &mut dyn_v, &mut dyn_i);
                 if dyn_i.len() > first {
                     let instance = instances.len() as u32;
-                    instances.push(Instance { offset: [0.0, 0.0], rs: [1.0, 0.0], color });
+                    // Vertices are already in screen space here, so there are no local coordinates
+                    // for the grain; at this magnification it is faded out anyway.
+                    instances.push(Instance { offset: [0.0, 0.0], rs: [1.0, 0.0], color, params: [0.0; 4] });
                     kinds.push(kind);
                     draws.push(Draw::Dynamic {
                         base_vertex: base as i32,
@@ -712,9 +749,9 @@ impl Renderer {
                 dyn_i.extend(mesh.indices.iter().map(|i| i + b));
             }
             if dyn_i.len() > first {
-                let (color, kind) = self.paint(a.stroke);
+                let (color, params, kind) = self.paint(a.stroke);
                 let instance = instances.len() as u32;
-                instances.push(Instance { offset: f32x2(a.offset), rs: rs(a.scale), color });
+                instances.push(Instance { offset: f32x2(a.offset), rs: rs(a.scale), color, params });
                 kinds.push(kind);
                 draws.push(Draw::Dynamic {
                     base_vertex: base as i32,
@@ -740,8 +777,8 @@ impl Renderer {
         };
         let vu = wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST;
         let iu = wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST;
-        grow(&mut self.instance_buf, &mut self.instance_cap, instances.len() as u64, 32, vu, "instances");
-        grow(&mut self.dyn_vbuf, &mut self.dyn_v_cap, dyn_v.len() as u64, 8, vu, "dyn v");
+        grow(&mut self.instance_buf, &mut self.instance_cap, instances.len() as u64, std::mem::size_of::<Instance>() as u64, vu, "instances");
+        grow(&mut self.dyn_vbuf, &mut self.dyn_v_cap, dyn_v.len() as u64, VERTEX_SIZE, vu, "dyn v");
         grow(&mut self.dyn_ibuf, &mut self.dyn_i_cap, dyn_i.len() as u64, 4, iu, "dyn i");
         if !instances.is_empty() {
             queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances));
@@ -757,7 +794,7 @@ impl Renderer {
         );
 
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
-            let mk = |label, samples, usage| {
+            let mk = |label, samples, usage, format| {
                 device
                     .create_texture(&wgpu::TextureDescriptor {
                         label: Some(label),
@@ -771,14 +808,15 @@ impl Renderer {
                     })
                     .create_view(&Default::default())
             };
-            let msaa = mk("msaa", MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
-            let layer = mk("layer", 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            let msaa = mk("msaa", MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT, format);
+            let stencil = mk("stencil", MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT, STENCIL_FORMAT);
+            let layer = mk("layer", 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, format);
             let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("composite"),
                 layout: &self.composite_bgl,
                 entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer) }],
             });
-            self.targets = Some(Targets { size, msaa, layer, composite });
+            self.targets = Some(Targets { size, msaa, stencil, layer, composite });
         }
         let targets = self.targets.as_ref().expect("just created");
 
@@ -815,10 +853,16 @@ impl Renderer {
                             store: if MSAA > 1 { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
                         },
                     })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &targets.stencil,
+                        depth_ops: None,
+                        stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+                    }),
                     ..Default::default()
                 })
                 .forget_lifetime();
             pass.set_bind_group(0, &self.bind_group, &[]);
+            let mut stencil_ref = 0u32;
             pass.set_vertex_buffer(1, self.instance_buf.slice(..));
             let mut bound: Option<usize> = None; // usize::MAX = dynamic buffers
             let mut kind_bound: Option<Kind> = None;
@@ -832,6 +876,12 @@ impl Renderer {
                         Kind::Erase => &self.pipeline_erase,
                     });
                     kind_bound = Some(kind);
+                }
+                if kind == Kind::Blend {
+                    // 1..=255, cycling. A repeat can only clash with a stroke 255 translucent
+                    // strokes earlier at the same pixel that nothing translucent covered since.
+                    stencil_ref = stencil_ref % 255 + 1;
+                    pass.set_stencil_reference(stencil_ref);
                 }
                 match *d {
                     Draw::Cached { chunk, base_vertex, first_index, count, instance } => {
@@ -903,7 +953,7 @@ fn push_cpu_path(
     scale: f64,
     rot: [f64; 2],
     vp: [f64; 2],
-    out_v: &mut Vec<[f32; 2]>,
+    out_v: &mut Vec<[f32; 3]>,
     out_i: &mut Vec<u32>,
 ) {
     let base = out_v.len() as u32;
@@ -911,7 +961,7 @@ fn push_cpu_path(
     let tf = |i: u32| {
         let v = mesh.vertices[i as usize];
         let r = canvas_core::camera::rotate([v[0] as f64 * scale, v[1] as f64 * scale], rot);
-        [offset[0] + r[0], offset[1] + r[1]]
+        [offset[0] + r[0], offset[1] + r[1], v[2] as f64]
     };
     for tri in mesh.indices.as_chunks::<3>().0 {
         let p = [tf(tri[0]), tf(tri[1]), tf(tri[2])];
@@ -922,20 +972,21 @@ fn push_cpu_path(
             continue;
         }
         let inside = p.iter().all(|q| q[0] >= guard[0] && q[0] <= guard[2] && q[1] >= guard[1] && q[1] <= guard[3]);
-        let poly: Vec<[f64; 2]> = if inside { p.to_vec() } else { clip_polygon(&p, guard) };
+        let poly: Vec<[f64; 3]> = if inside { p.to_vec() } else { clip_polygon(&p, guard) };
         if poly.len() < 3 {
             continue;
         }
         let first = out_v.len() as u32 - base;
-        out_v.extend(poly.iter().map(|q| [q[0] as f32, q[1] as f32]));
+        out_v.extend(poly.iter().map(|q| [q[0] as f32, q[1] as f32, q[2] as f32]));
         for k in 1..poly.len() as u32 - 1 {
             out_i.extend_from_slice(&[first, first + k, first + k + 1]);
         }
     }
 }
 
-/// Sutherland–Hodgman clipping of a convex polygon against an axis-aligned rectangle.
-fn clip_polygon(poly: &[[f64; 2]], r: [f64; 4]) -> Vec<[f64; 2]> {
+/// Sutherland–Hodgman clipping of a convex polygon against an axis-aligned rectangle
+/// (x, y; the third component is an attribute, interpolated along cut edges).
+fn clip_polygon(poly: &[[f64; 3]], r: [f64; 4]) -> Vec<[f64; 3]> {
     let mut out = poly.to_vec();
     // (axis, bound, keep_greater)
     for (axis, bound, greater) in [(0, r[0], true), (0, r[2], false), (1, r[1], true), (1, r[3], false)] {
@@ -943,7 +994,7 @@ fn clip_polygon(poly: &[[f64; 2]], r: [f64; 4]) -> Vec<[f64; 2]> {
             break;
         }
         let input = std::mem::take(&mut out);
-        let ins = |p: &[f64; 2]| if greater { p[axis] >= bound } else { p[axis] <= bound };
+        let ins = |p: &[f64; 3]| if greater { p[axis] >= bound } else { p[axis] <= bound };
         for i in 0..input.len() {
             let a = input[i];
             let b = input[(i + 1) % input.len()];
@@ -953,7 +1004,7 @@ fn clip_polygon(poly: &[[f64; 2]], r: [f64; 4]) -> Vec<[f64; 2]> {
             }
             if ia != ib {
                 let t = (bound - a[axis]) / (b[axis] - a[axis]);
-                out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+                out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
             }
         }
     }
@@ -966,10 +1017,11 @@ mod tests {
 
     #[test]
     fn clip_triangle_to_rect() {
-        let tri = [[-10.0, 5.0], [20.0, 5.0], [5.0, 30.0]];
+        let tri = [[-10.0, 5.0, 1.0], [20.0, 5.0, 1.0], [5.0, 30.0, 0.0]];
         let out = clip_polygon(&tri, [0.0, 0.0, 10.0, 10.0]);
         assert!(out.len() >= 3);
         for p in out {
+            assert!((0.0..=1.0).contains(&p[2]));
             assert!(p[0] >= -1e-9 && p[0] <= 10.0 + 1e-9 && p[1] >= -1e-9 && p[1] <= 10.0 + 1e-9);
         }
     }

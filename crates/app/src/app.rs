@@ -9,7 +9,7 @@ use canvas_core::history::{Action, History};
 use canvas_core::io;
 use canvas_core::mesh::{Mesh, lod_for, tessellate_part};
 use canvas_core::smoothing::PointerSmoother;
-use canvas_core::stroke::{Stroke, StrokePoint};
+use canvas_core::stroke::{Brush, Stroke, StrokePoint};
 use std::collections::HashSet;
 use crate::projects::Projects;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,9 @@ struct ActiveStroke {
     frozen: Vec<Mesh>,
     /// Points before this index are covered by `frozen`.
     frozen_upto: usize,
+    /// Smoothed pointer speed (points per second), for the dynamic pen.
+    speed: f64,
+    last_sample: Option<([f64; 2], f64)>,
 }
 
 /// While drawing, every this many points are tessellated once and kept, so each frame only
@@ -531,8 +534,18 @@ impl CanvasApp {
             if eraser { (Stroke::ERASER_COLOR, self.tools.eraser) } else { ([c.r(), c.g(), c.b(), c.a()], self.tools.width) };
         let width_px = width_pt as f64 * self.pixels_per_point as f64;
         let id = self.doc.alloc_id();
-        let stroke = Stroke::new(id, level, anchor, color, (width_px / frame.scale) as f32);
-        self.active = Some(ActiveStroke { stroke, smoother: PointerSmoother::default(), frozen: Vec::new(), frozen_upto: 0 });
+        let mut stroke = Stroke::new(id, level, anchor, color, (width_px / frame.scale) as f32);
+        if !eraser {
+            stroke.brush = self.tools.brush;
+        }
+        self.active = Some(ActiveStroke {
+            stroke,
+            smoother: PointerSmoother::default(),
+            frozen: Vec::new(),
+            frozen_upto: 0,
+            speed: 0.0,
+            last_sample: None,
+        });
         self.extend_stroke(pos, pressure, time, kind);
     }
 
@@ -540,7 +553,18 @@ impl CanvasApp {
         let Some(a) = self.active.as_mut() else { return };
         // The eraser always has its full size.
         let pressure = if a.stroke.is_eraser() { 1.0 } else { Self::pressure(kind, pressure) };
-        let (x, y, p) = a.smoother.push(pos[0], pos[1], pressure as f64, time);
+        let (x, y, mut p) = a.smoother.push(pos[0], pos[1], pressure as f64, time);
+        if a.stroke.brush == Brush::Dynamic {
+            // Fast = thin: the width factor is stored as the point's pressure.
+            if let Some((lp, lt)) = a.last_sample {
+                let dt = (time - lt).max(1e-3);
+                let v = ((x - lp[0]).powi(2) + (y - lp[1]).powi(2)).sqrt() / dt / self.pixels_per_point as f64;
+                a.speed += (v - a.speed) * (dt / (dt + 0.05));
+            }
+            a.last_sample = Some(([x, y], time));
+            let thin = (a.speed / 1500.0).clamp(0.0, 1.0);
+            p = (1.0 - 0.7 * thin) * canvas_core::stroke::pressure_factor(p as f32) as f64;
+        }
         // Recomputed every sample: the camera may move while drawing (wheel zoom on desktop).
         let frame = self.camera.level_frame(a.stroke.level, self.viewport);
         let l = frame.screen_to_local([x, y], &a.stroke.anchor, a.stroke.cache.anchor_fast);

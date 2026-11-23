@@ -7,14 +7,45 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 4] = b"ICNV";
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
-/// Version 4: the camera has a rotation.
+/// Version 5: strokes have a brush.
 #[derive(Serialize, Deserialize)]
-struct FileV4 {
+struct FileV5 {
     camera: Camera,
     next_id: StrokeId,
     strokes: Vec<Stroke>,
+}
+
+/// Version 4: the camera has a rotation; strokes as in version 3.
+#[derive(Deserialize)]
+struct FileV4 {
+    camera: Camera,
+    next_id: StrokeId,
+    strokes: Vec<StrokeV3>,
+}
+
+/// Stroke of versions 3–4 (no brush).
+#[derive(Deserialize)]
+struct StrokeV3 {
+    id: StrokeId,
+    level: i32,
+    anchor: [num_bigint::BigInt; 2],
+    points: Vec<crate::stroke::StrokePoint>,
+    color: [u8; 4],
+    width: f32,
+    order: u64,
+    flat_caps: [bool; 2],
+}
+
+impl From<StrokeV3> for Stroke {
+    fn from(s: StrokeV3) -> Self {
+        let mut out = Stroke::new(s.id, s.level, s.anchor, s.color, s.width);
+        out.points = s.points;
+        out.order = s.order;
+        out.flat_caps = s.flat_caps;
+        out
+    }
 }
 
 /// Camera of versions 1–3 (no rotation).
@@ -35,7 +66,7 @@ impl From<CameraV1> for Camera {
 struct FileV3 {
     camera: CameraV1,
     next_id: StrokeId,
-    strokes: Vec<Stroke>,
+    strokes: Vec<StrokeV3>,
 }
 
 /// Version 2: strokes carry a draw order (`Stroke::order`), no caps.
@@ -114,7 +145,7 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 pub fn encode(doc: &Document, camera: &Camera) -> Vec<u8> {
-    let file = FileV4 { camera: camera.clone(), next_id: doc.next_id(), strokes: doc.strokes().cloned().collect() };
+    let file = FileV5 { camera: camera.clone(), next_id: doc.next_id(), strokes: doc.strokes().cloned().collect() };
     let mut out = Vec::with_capacity(64 + doc.len() * 128);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
@@ -138,10 +169,14 @@ pub fn decode(bytes: &[u8]) -> Result<(Document, Camera), LoadError> {
         }
         3 => {
             let f: FileV3 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
-            Ok((Document::from_strokes(f.strokes, f.next_id), f.camera.into()))
+            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera.into()))
         }
         4 => {
             let f: FileV4 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
+            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera))
+        }
+        5 => {
+            let f: FileV5 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
             Ok((Document::from_strokes(f.strokes, f.next_id), f.camera))
         }
         v => Err(LoadError::UnsupportedVersion(v)),
@@ -178,9 +213,11 @@ mod tests {
         let mut doc = Document::new();
         let mut cam = Camera::default();
         cam.zoom_at([1.0, 2.0], [100.0, 100.0], 333.25);
+        // (the stroke below also checks that the brush survives a round trip)
         cam.rotate_at([1.0, 2.0], [100.0, 100.0], 0.7);
         let anchor = [BigInt::from(-7) << 400u32, BigInt::from(12345) << 333u32];
         let mut s = Stroke::new(doc.alloc_id(), 333, anchor, [1, 2, 3, 255], 3.5);
+        s.brush = crate::stroke::Brush::Marker;
         s.push(StrokePoint { x: 1.0, y: -2.0, pressure: 0.5 });
         s.push(StrokePoint { x: 5.0, y: 2.0, pressure: 0.7 });
         doc.insert(s.clone());
@@ -201,7 +238,7 @@ mod tests {
     fn rejects_garbage() {
         assert!(matches!(decode(b"nope"), Err(LoadError::BadMagic)));
         assert!(matches!(decode(b"ICNV\x09\x00"), Err(LoadError::UnsupportedVersion(9))));
-        assert!(matches!(decode(b"ICNV\x04\x00\xff"), Err(LoadError::Corrupt(_))));
+        assert!(matches!(decode(b"ICNV\x05\x00\xff"), Err(LoadError::Corrupt(_))));
     }
 
     #[test]
@@ -285,16 +322,37 @@ mod tests {
             log_zoom: f64,
         }
         #[derive(Serialize)]
+        struct S3 {
+            id: StrokeId,
+            level: i32,
+            anchor: [BigInt; 2],
+            points: Vec<StrokePoint>,
+            color: [u8; 4],
+            width: f32,
+            order: u64,
+            flat_caps: [bool; 2],
+        }
+        #[derive(Serialize)]
         struct F3 {
             camera: C1,
             next_id: StrokeId,
-            strokes: Vec<Stroke>,
+            strokes: Vec<S3>,
         }
         let mut st = Stroke::new(4, 1, [BigInt::from(3), BigInt::from(-3)], [5, 5, 5, 255], 1.5);
         st.push(StrokePoint { x: 0.0, y: 0.0, pressure: 1.0 });
         st.push(StrokePoint { x: 2.0, y: 1.0, pressure: 0.5 });
         st.flat_caps = [true, false];
-        let f = F3 { camera: C1 { center: crate::coords::WorldPos::origin(), log_zoom: -7.0 }, next_id: 5, strokes: vec![st.clone()] };
+        let s3 = S3 {
+            id: st.id,
+            level: st.level,
+            anchor: st.anchor.clone(),
+            points: st.points.clone(),
+            color: st.color,
+            width: st.width,
+            order: st.order,
+            flat_caps: st.flat_caps,
+        };
+        let f = F3 { camera: C1 { center: crate::coords::WorldPos::origin(), log_zoom: -7.0 }, next_id: 5, strokes: vec![s3] };
         let mut bytes = b"ICNV\x03\x00".to_vec();
         bytes.extend(postcard::to_allocvec(&f).unwrap());
         let (d, cam) = decode(&bytes).unwrap();

@@ -76,6 +76,25 @@ cargo run --release -- inny.icnv    # otwiera jeden konkretny plik
 
 Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
 
+### Pędzle
+
+Przycisk z nazwą pędzla na pasku otwiera listę. Każdy pędzel pamięta własną grubość.
+
+| Pędzel | Działanie |
+|---|---|
+| Pióro | grubość z naciskiem |
+| Pióro wieczne | stalówka pod kątem: grubość zależy od kierunku ruchu (i nacisku) |
+| Pióro dynamiczne | szybki ruch = cieńsza linia |
+| Stała grubość | zawsze ta sama grubość |
+| Ołówek miękki / twardy | półprzezroczysty, z ziarnem papieru; nacisk = ciemniej |
+| Marker | półprzezroczysty, ścięta końcówka, nakładane kreski ciemnieją |
+| Kropkowana | kropki co ~2 grubości |
+| Wypełnienie | wypełnia kolorem kształt obrysowany pociągnięciem |
+
+Wszystkie pędzle są wektorowe (ziarno ołówka liczone w shaderze we współrzędnych kreski), więc
+nie tracą ostrości przy zoomie. Kreska półprzezroczysta nie ciemnieje tam, gdzie nachodzi sama
+na siebie (bufor stencil).
+
 ### Gesty
 
 | Akcja | Gest |
@@ -103,7 +122,7 @@ jest renderowana z wektorów przy wyjściu z projektu i co ~20 s podczas rysowan
 ## Zapis
 
 Rysunek zapisuje się automatycznie ~1,5 s po każdej zmianie oraz przy wyjściu/wstrzymaniu
-aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 4; starsze wersje nadal się
+aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 5; starsze wersje nadal się
 wczytują), dane w `postcard`. Zapis jest
 atomowy (plik tymczasowy + rename). Uszkodzony plik nie jest nadpisywany – zostaje przemianowany
 na `*.broken`.

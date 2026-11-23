@@ -1,6 +1,7 @@
 //! Minimal floating toolbar (egui). Kept small and at the top edge so it never covers much.
 
 use crate::projects::{self, ProjectInfo, Projects};
+use canvas_core::stroke::Brush;
 use std::collections::HashMap;
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 
@@ -12,18 +13,51 @@ pub enum Tool {
 
 pub struct ToolState {
     pub tool: Tool,
+    pub brush: Brush,
     pub color: Color32,
-    /// Pen width in logical points (screen size at drawing time).
+    /// Width of the current brush in logical points (screen size at drawing time).
     pub width: f32,
+    /// Remembered width of every other brush.
+    widths: HashMap<Brush, f32>,
     /// Eraser diameter in logical points.
     pub eraser: f32,
     pub palette: Vec<Color32>,
+}
+
+impl ToolState {
+    /// Switches brush (and to drawing), keeping a separate width per brush.
+    pub fn set_brush(&mut self, b: Brush) {
+        self.tool = Tool::Pen;
+        if b == self.brush {
+            return;
+        }
+        self.widths.insert(self.brush, self.width);
+        self.brush = b;
+        self.width = self.widths.get(&b).copied().unwrap_or(b.default_width());
+    }
+}
+
+/// Short brush label for the toolbar (the menu shows full names).
+fn short_name(b: Brush) -> &'static str {
+    match b {
+        Brush::Pen => "Pióro",
+        Brush::Fountain => "Wieczne",
+        Brush::Dynamic => "Dynamiczne",
+        Brush::Fixed => "Stałe",
+        Brush::SoftPencil => "Ołówek M",
+        Brush::HardPencil => "Ołówek T",
+        Brush::Marker => "Marker",
+        Brush::Dotted => "Kropki",
+        Brush::Fill => "Wypełnij",
+    }
 }
 
 impl Default for ToolState {
     fn default() -> Self {
         Self {
             tool: Tool::Pen,
+            brush: Brush::Pen,
+            widths: HashMap::new(),
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
             eraser: 24.0,
@@ -86,8 +120,19 @@ fn swatch(ui: &mut egui::Ui, color: Color32, selected: bool) -> egui::Response {
 }
 
 /// Draws the toolbar; returns actions and the screen rects (in points) the UI covers.
+/// Brush button (opens the list of brushes) and the eraser.
 fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
-    ui.selectable_value(&mut s.tool, Tool::Pen, "Pióro");
+    let button = egui::Button::new(short_name(s.brush)).selected(s.tool == Tool::Pen);
+    let r = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
+        ui.set_min_width(170.0);
+        for b in Brush::ALL {
+            if ui.add(egui::Button::new(b.name()).selected(s.tool == Tool::Pen && s.brush == b)).clicked() {
+                s.set_brush(b);
+                ui.close();
+            }
+        }
+    });
+    r.0.on_hover_text("Pędzel");
     ui.selectable_value(&mut s.tool, Tool::Eraser, "Gumka");
 }
 
@@ -178,9 +223,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
             if compact {
                 ui.horizontal(|ui| {
                     menu_button(ui, &mut a);
-                    ui.separator();
                     tool_buttons(ui, s);
-                    ui.separator();
                     history_buttons(ui, info, &mut a);
                 });
                 ui.horizontal_wrapped(|ui| colors(ui, s));
@@ -402,19 +445,23 @@ mod layout_tests {
             st.spacing.button_padding = egui::vec2(8.0, 6.0);
             st.spacing.slider_width = 120.0;
         });
-        let mut s = ToolState::default();
         let info = Info { can_undo: true, can_redo: false, log_zoom: -33.4, rotation: -2.5, strokes: 2 };
         let mut rect = Rect::NOTHING;
-        for _ in 0..4 {
-            let raw = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),
-                ..Default::default()
-            };
-            let mut out = ctx.run_ui(raw, |ui| {
-                let (_, r) = toolbar(ui.ctx(), &mut s, &info, 24.0);
-                rect = r[0];
-            });
-            out.textures_delta.clear();
+        for brush in Brush::ALL {
+            let mut s = ToolState::default();
+            s.set_brush(brush);
+            for _ in 0..4 {
+                let raw = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(raw, |ui| {
+                    let (_, r) = toolbar(ui.ctx(), &mut s, &info, 24.0);
+                    rect = r[0];
+                });
+                out.textures_delta.clear();
+            }
+            assert!(rect.min.x >= 0.0 && rect.max.x <= 360.0, "{brush:?}: {rect:?}");
         }
         assert!(rect.min.x >= 0.0 && rect.max.x <= 360.0, "{rect:?}");
         assert!(rect.min.y >= 24.0, "{rect:?}");

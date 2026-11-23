@@ -366,3 +366,85 @@ fn long_stroke_in_progress_is_continuous() {
     mouse(&mut app, Phase::Up, [730.0, 150.0], 3.0);
     assert_eq!(app.doc.len(), 1);
 }
+
+fn gray(px: &[u8], x: u32, y: u32) -> u8 {
+    px[((y * W + x) * 4) as usize]
+}
+
+/// Draws through the given points with the mouse (one stroke).
+fn draw_path(app: &mut CanvasApp, pts: &[[f64; 2]], t0: f64) {
+    mouse(app, Phase::Down, pts[0], t0);
+    let mut t = t0;
+    for w in pts.windows(2) {
+        for k in 1..=40 {
+            let f = k as f64 / 40.0;
+            t += 1.0 / 240.0;
+            mouse(app, Phase::Move, [w[0][0] + (w[1][0] - w[0][0]) * f, w[0][1] + (w[1][1] - w[0][1]) * f], t);
+        }
+    }
+    for _ in 0..30 {
+        t += 1.0 / 240.0;
+        mouse(app, Phase::Move, *pts.last().unwrap(), t);
+    }
+    mouse(app, Phase::Up, *pts.last().unwrap(), t);
+}
+
+#[test]
+fn translucent_brushes_blend_once_per_stroke() {
+    use canvas_core::stroke::Brush;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.set_brush(Brush::Marker);
+    app.tools.width = 16.0;
+    // A: one pass. B: there and back over itself. C: crosses A (a second stroke).
+    // (Below the toolbar, which covers the top ~110 px.)
+    draw_path(&mut app, &[[100.0, 160.0], [500.0, 160.0]], 0.0);
+    draw_path(&mut app, &[[100.0, 240.0], [500.0, 240.0], [150.0, 240.0]], 5.0);
+    draw_path(&mut app, &[[300.0, 125.0], [300.0, 200.0]], 10.0);
+    let px = gpu.frame(&mut app);
+    let (a, b, both) = (gray(&px, 400, 160), gray(&px, 400, 240), gray(&px, 300, 160));
+    eprintln!("marker: single {a}, over itself {b}, two strokes {both}");
+    assert!(a > 40 && a < 200, "translucent: {a}");
+    assert!((a as i32 - b as i32).abs() <= 3, "a stroke over itself is not darker: {a} vs {b}");
+    assert!(both + 25 < a, "two strokes stack: {both} vs {a}");
+}
+
+#[test]
+fn pencil_dotted_and_fill() {
+    use canvas_core::stroke::Brush;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    // Pencil: lighter than ink, with grain (not uniform along the line).
+    app.tools.set_brush(Brush::SoftPencil);
+    app.tools.width = 8.0;
+    draw_path(&mut app, &[[50.0, 150.0], [350.0, 150.0]], 0.0);
+    // Dotted: dots with gaps.
+    app.tools.set_brush(Brush::Dotted);
+    app.tools.width = 6.0;
+    draw_path(&mut app, &[[50.0, 220.0], [350.0, 220.0]], 5.0);
+    // Fill: a closed loop is filled inside.
+    app.tools.set_brush(Brush::Fill);
+    draw_path(&mut app, &[[450.0, 130.0], [700.0, 130.0], [700.0, 280.0], [450.0, 280.0], [450.0, 130.0]], 10.0);
+    let px = gpu.frame(&mut app);
+
+    let pencil: Vec<u8> = (60..340).map(|x| gray(&px, x, 150)).collect();
+    let (lo, hi) = (*pencil.iter().min().unwrap(), *pencil.iter().max().unwrap());
+    eprintln!("pencil range {lo}..{hi}");
+    assert!(hi > 60, "pencil is not solid black");
+    assert!(hi - lo > 30, "pencil has grain");
+    assert!(lo < 200, "pencil is visible");
+
+    let dots: Vec<bool> = (60..340).map(|x| dark(&px, x, 220)).collect();
+    let changes = dots.windows(2).filter(|w| w[0] != w[1]).count();
+    assert!(changes >= 10, "dotted line has gaps ({changes} edges)");
+
+    assert!(dark(&px, 575, 200) && dark(&px, 500, 260), "inside of the fill");
+    assert!(!dark(&px, 730, 200), "outside of the fill");
+}
+

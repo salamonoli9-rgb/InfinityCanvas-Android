@@ -6,6 +6,95 @@ use serde::{Deserialize, Serialize};
 
 pub type StrokeId = u64;
 
+/// How a stroke's points turn into ink.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Brush {
+    /// Width follows pressure.
+    #[default]
+    Pen,
+    /// Calligraphic nib: width follows the direction of travel (and pressure).
+    Fountain,
+    /// Width follows speed: fast = thin. The input stores the width factor as `pressure`.
+    Dynamic,
+    /// Constant width.
+    Fixed,
+    /// Translucent, grainy; pressure changes darkness.
+    SoftPencil,
+    HardPencil,
+    /// Translucent chisel tip: width follows direction, flat ends.
+    Marker,
+    /// Round dots along the path.
+    Dotted,
+    /// Fills the area enclosed by the path.
+    Fill,
+}
+
+impl Brush {
+    pub const ALL: [Brush; 9] = [
+        Brush::Pen,
+        Brush::Fountain,
+        Brush::Dynamic,
+        Brush::Fixed,
+        Brush::SoftPencil,
+        Brush::HardPencil,
+        Brush::Marker,
+        Brush::Dotted,
+        Brush::Fill,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Brush::Pen => "Pióro",
+            Brush::Fountain => "Pióro wieczne",
+            Brush::Dynamic => "Pióro dynamiczne",
+            Brush::Fixed => "Stała grubość",
+            Brush::SoftPencil => "Ołówek miękki",
+            Brush::HardPencil => "Ołówek twardy",
+            Brush::Marker => "Marker",
+            Brush::Dotted => "Kropkowana",
+            Brush::Fill => "Wypełnienie",
+        }
+    }
+
+    /// Default width in screen points.
+    pub fn default_width(self) -> f32 {
+        match self {
+            Brush::Pen | Brush::Fixed => 3.0,
+            Brush::Fountain => 7.0,
+            Brush::Dynamic => 5.0,
+            Brush::SoftPencil => 3.5,
+            Brush::HardPencil => 1.5,
+            Brush::Marker => 16.0,
+            Brush::Dotted => 4.0,
+            Brush::Fill => 2.0,
+        }
+    }
+
+    /// Multiplies the colour's alpha.
+    pub fn opacity(self) -> f32 {
+        match self {
+            Brush::SoftPencil => 0.92,
+            Brush::HardPencil => 0.8,
+            Brush::Marker => 0.55,
+            _ => 1.0,
+        }
+    }
+
+    /// Paper grain: (strength 0..1, cell size in local units ≈ px when drawn).
+    pub fn grain(self) -> Option<(f32, f32)> {
+        match self {
+            Brush::SoftPencil => Some((0.75, 1.3)),
+            Brush::HardPencil => Some((0.55, 0.8)),
+            _ => None,
+        }
+    }
+
+    /// Whether the ink is fully opaque (may then be drawn without blending).
+    pub fn is_solid(self) -> bool {
+        self.opacity() >= 1.0 && self.grain().is_none()
+    }
+}
+
 /// One input sample in level-local units (1 unit ≈ 1–2 screen px at drawing time).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StrokePoint {
@@ -31,6 +120,7 @@ pub struct Stroke {
     pub order: u64,
     /// Flat (butt) end at the start / end instead of a round cap: set where the eraser cut.
     pub flat_caps: [bool; 2],
+    pub brush: Brush,
     #[serde(skip)]
     pub cache: StrokeCache,
 }
@@ -50,7 +140,7 @@ pub fn pressure_factor(p: f32) -> f32 {
 
 impl Stroke {
     pub fn new(id: StrokeId, level: i32, anchor: [BigInt; 2], color: [u8; 4], width: f32) -> Self {
-        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, flat_caps: [false; 2], cache: StrokeCache::default() };
+        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, flat_caps: [false; 2], brush: Brush::Pen, cache: StrokeCache::default() };
         s.refresh_cache();
         s
     }
@@ -62,8 +152,30 @@ impl Stroke {
         self.color[3] == 0
     }
 
+    /// Largest ink radius at a point (direction-dependent brushes are thinner in some
+    /// directions; this is their upper bound, used for bounding boxes and hit tests).
     pub fn radius_at(&self, p: &StrokePoint) -> f32 {
-        0.5 * self.width * pressure_factor(p.pressure)
+        0.5 * self.width * self.width_factor(p.pressure)
+    }
+
+    /// Width multiplier from the stored pressure, before any direction effect.
+    pub fn width_factor(&self, pressure: f32) -> f32 {
+        match self.brush {
+            Brush::Pen | Brush::Fountain | Brush::Dotted => pressure_factor(pressure),
+            Brush::Dynamic => pressure.clamp(0.15, 1.0),
+            Brush::SoftPencil | Brush::HardPencil => 0.55 + 0.45 * pressure.clamp(0.0, 1.0),
+            Brush::Fixed | Brush::Marker | Brush::Fill => 1.0,
+        }
+    }
+
+    /// Ink intensity (alpha multiplier) from pressure: pencils get darker when pressed.
+    pub fn intensity(&self, pressure: f32) -> f32 {
+        let p = pressure.clamp(0.0, 1.0);
+        match self.brush {
+            Brush::SoftPencil => 0.3 + 0.7 * p,
+            Brush::HardPencil => 0.25 + 0.6 * p,
+            _ => 1.0,
+        }
     }
 
     pub fn refresh_cache(&mut self) {
