@@ -143,6 +143,7 @@ pub struct Timings {
 }
 
 /// Where a frame goes.
+#[derive(Clone, Copy)]
 pub enum Target<'a> {
     Surface(&'a Gpu),
     View {
@@ -152,6 +153,15 @@ pub enum Target<'a> {
         size: [u32; 2],
         view: &'a wgpu::TextureView,
     },
+}
+
+impl Target<'_> {
+    pub fn device_queue_format(&self) -> (&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat) {
+        match self {
+            Target::Surface(g) => (&g.device, &g.queue, g.config.format),
+            Target::View { device, queue, format, .. } => (device, queue, *format),
+        }
+    }
 }
 
 /// What the app wants drawn this frame.
@@ -189,6 +199,8 @@ pub struct Renderer {
     pub needs_another_frame: bool,
     /// CPU time of the last frame's phases (seconds), for profiling.
     pub timings: Timings,
+    /// Tessellate everything this frame (offscreen renders that must be complete).
+    unlimited_budget: bool,
 }
 
 impl Renderer {
@@ -296,6 +308,7 @@ impl Renderer {
             srgb: format.is_srgb(),
             needs_another_frame: false,
             timings: Timings::default(),
+            unlimited_budget: false,
         }
     }
 
@@ -404,6 +417,68 @@ impl Renderer {
         }
     }
 
+    /// Renders a complete frame offscreen and returns straight RGBA pixels (row-major).
+    /// `size[0]` must be a multiple of 64 (texture copy row alignment).
+    pub fn render_rgba(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        size: [u32; 2],
+        input: FrameInput,
+    ) -> Vec<u8> {
+        debug_assert!(size[0].is_multiple_of(64));
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        self.unlimited_budget = true;
+        // The main MSAA target is sized for the window; keep it for the next frame.
+        let msaa = self.msaa_view.take();
+        self.render_to(device, queue, format, size, &view, input);
+        self.msaa_view = msaa;
+        self.unlimited_budget = false;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (size[0] * size[1] * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0] * 4), rows_per_image: Some(size[1]) },
+            },
+            wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+        );
+        queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        if let Err(e) = device.poll(wgpu::PollType::wait_indefinitely()) {
+            log::warn!("offscreen render: {e}");
+            return Vec::new();
+        }
+        let Ok(mapped) = slice.get_mapped_range() else { return Vec::new() };
+        let mut data = mapped.to_vec();
+        drop(mapped);
+        buf.unmap();
+        if matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb) {
+            for px in data.as_chunks_mut::<4>().0 {
+                px.swap(0, 2);
+            }
+        }
+        data
+    }
+
     /// Renders one frame to the window surface and presents it.
     pub fn render(&mut self, gpu: &Gpu, mut input: FrameInput) {
         let t0 = Instant::now();
@@ -461,7 +536,7 @@ impl Renderer {
                         m.last_used = self.frame;
                         Some(*m)
                     }
-                    None if started.elapsed() < TESSELLATION_BUDGET => {
+                    None if self.unlimited_budget || started.elapsed() < TESSELLATION_BUDGET => {
                         let mesh = tessellate(stroke, lod);
                         self.upload_mesh(device, queue, &mesh).map(|(chunk, base_vertex, first_index)| {
                             let m = CachedMesh {

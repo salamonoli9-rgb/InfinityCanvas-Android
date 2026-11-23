@@ -265,3 +265,28 @@ fn perf_10k_strokes() {
     }
     eprintln!("zoomed 16x: {:?} per frame", start.elapsed() / (n * 3));
 }
+
+#[test]
+fn leaving_a_project_writes_its_preview() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("icnv-thumb-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = CanvasApp::with_projects(&dir);
+    app.resize([W, H]);
+    app.tools.width = 30.0;
+    app.gallery_action(infinite_canvas::ui::GalleryAction::New);
+    // Thick horizontal line across the middle of the screen.
+    draw_line(&mut app, H as f64 / 2.0, 100.0, W as f64 - 100.0);
+    assert!(app.back());
+    gpu.frame(&mut app);
+    assert_eq!(app.screen, infinite_canvas::app::Screen::Gallery);
+    let projects = infinite_canvas::projects::Projects::new(&dir).unwrap();
+    let (w, h, px) = projects.load_thumbnail("Rysunek 1").expect("preview written");
+    let at = |x: u32, y: u32| px[((y * w + x) * 4) as usize];
+    assert!(at(w / 2, h / 2) < 100, "line visible in the middle");
+    assert!(at(w / 2, h / 2 + 40) > 200, "background elsewhere");
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -1,6 +1,7 @@
 //! Minimal floating toolbar (egui). Kept small and at the top edge so it never covers much.
 
-use crate::projects::{self, ProjectInfo};
+use crate::projects::{self, ProjectInfo, Projects};
+use std::collections::HashMap;
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,7 +119,7 @@ fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
 }
 
 fn menu_button(ui: &mut egui::Ui, a: &mut Actions) {
-    a.menu |= ui.button("Menu").on_hover_text("Projekty: nowa kartka, otwórz, zmień nazwę").clicked();
+    a.menu |= ui.button("Projekty").on_hover_text("Wróć do listy projektów").clicked();
 }
 
 fn zoom_label(ui: &mut egui::Ui, info: &Info) {
@@ -203,114 +204,161 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
     (a, rects)
 }
 
-/// State of the projects window.
+/// State of the projects gallery (start screen).
 #[derive(Default)]
-pub struct MenuState {
-    pub open: bool,
-    /// Text in the "name" field (rename of the current project).
-    pub name_edit: String,
-    /// Project waiting for a delete confirmation.
-    pub confirm_delete: Option<String>,
-    /// Feedback line (errors, "zapisano").
-    pub message: Option<String>,
+pub struct GalleryState {
     pub list: Vec<ProjectInfo>,
+    /// Loaded previews by project name (`None` = no preview file).
+    pub thumbs: HashMap<String, Option<egui::TextureHandle>>,
+    /// Project whose options dialog is open.
+    pub options: Option<String>,
+    pub name_edit: String,
+    pub confirm_delete: bool,
+    /// Feedback line (errors, "zmieniono nazwę").
+    pub message: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum MenuAction {
+pub enum GalleryAction {
     New,
     Open(String),
-    Rename(String),
-    Duplicate,
+    Rename { from: String, to: String },
+    Duplicate(String),
     Delete(String),
-    Save,
 }
 
-/// The projects window. Returns the chosen actions; the caller applies them.
-pub fn projects_window(ctx: &egui::Context, st: &mut MenuState, current: &str, safe_top: f32) -> Vec<MenuAction> {
+const CARD_MIN_WIDTH: f32 = 150.0;
+const CARD_GAP: f32 = 12.0;
+/// Preview aspect (height / width), same as the rendered thumbnails.
+pub const THUMB_ASPECT: f32 = 340.0 / 256.0;
+
+/// Full-screen grid of projects with previews. Returns what the user picked.
+pub fn gallery(root: &mut egui::Ui, st: &mut GalleryState, projects: &Projects, safe_top: f32, background: Color32) -> Vec<GalleryAction> {
+    let ctx = root.ctx().clone();
     let mut out = Vec::new();
-    if !st.open {
-        return out;
-    }
-    let screen = ctx.content_rect();
-    let width = (screen.width() - 16.0).min(440.0);
-    let max_h = (screen.height() - safe_top - 24.0).max(200.0);
-    let mut open = true;
-    egui::Window::new("Projekty")
-        .id(egui::Id::unique("projects"))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top])
-        .fixed_size([width, 0.0])
-        .max_height(max_h)
-        .show(ctx, |ui| {
-            ui.set_width(width - 16.0);
-            ui.label(egui::RichText::new("Bieżąca kartka").small().weak());
-            ui.horizontal(|ui| {
-                let field = egui::TextEdit::singleline(&mut st.name_edit).desired_width(ui.available_width() - 110.0);
-                let r = ui.add(field);
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let changed = st.name_edit.trim() != current;
-                if (ui.add_enabled(changed, egui::Button::new("Zmień nazwę")).clicked() || (enter && changed))
-                    && !st.name_edit.trim().is_empty()
-                {
-                    out.push(MenuAction::Rename(st.name_edit.clone()));
-                }
+    // Load previews lazily (they are small PNGs).
+    for p in &st.list {
+        if !st.thumbs.contains_key(&p.name) {
+            let tex = projects.load_thumbnail(&p.name).map(|(w, h, rgba)| {
+                let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                ctx.load_texture(format!("thumb:{}", p.name), img, egui::TextureOptions::LINEAR)
             });
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Nowa kartka").clicked() {
-                    out.push(MenuAction::New);
-                }
-                if ui.button("Duplikuj").clicked() {
-                    out.push(MenuAction::Duplicate);
-                }
-                if ui.button("Zapisz").on_hover_text("Rysunek zapisuje się też sam").clicked() {
-                    out.push(MenuAction::Save);
-                }
+            st.thumbs.insert(p.name.clone(), tex);
+        }
+    }
+    let dialog_open = st.options.is_some();
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(background).inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 0 }))
+        .show(root, |ui| {
+            ui.add_space(safe_top + 16.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Projekty").size(28.0).strong());
             });
             if let Some(m) = &st.message {
-                ui.label(egui::RichText::new(m).italics());
+                ui.label(egui::RichText::new(m).italics().weak());
             }
-            ui.separator();
-            ui.label(egui::RichText::new("Zapisane projekty").small().weak());
-            egui::ScrollArea::vertical().max_height((max_h - 220.0).max(120.0)).show(ui, |ui| {
-                for p in &st.list {
-                    let is_current = p.name == current;
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            let name = egui::RichText::new(&p.name);
-                            ui.label(if is_current { name.strong() } else { name });
-                            ui.label(egui::RichText::new(projects::ago(p.modified)).small().weak());
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if st.confirm_delete.as_deref() == Some(p.name.as_str()) {
-                                if ui.button("Nie").clicked() {
-                                    st.confirm_delete = None;
+            ui.add_space(8.0);
+            let avail = ui.available_width();
+            let cols = ((avail + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)).floor().max(2.0) as usize;
+            let card_w = (avail - CARD_GAP * (cols - 1) as f32) / cols as f32;
+            let thumb = egui::vec2(card_w, card_w * THUMB_ASPECT);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(CARD_GAP, CARD_GAP);
+                let items: Vec<Option<&ProjectInfo>> = std::iter::once(None).chain(st.list.iter().map(Some)).collect();
+                for row in items.chunks(cols) {
+                    ui.horizontal_top(|ui| {
+                        for item in row {
+                            ui.vertical(|ui| {
+                                ui.set_width(card_w);
+                                ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+                                let (rect, resp) = ui.allocate_exact_size(thumb, if dialog_open { Sense::hover() } else { Sense::click() });
+                                let painter = ui.painter();
+                                let corner = CornerRadius::same(12);
+                                painter.rect_filled(rect, corner, Color32::WHITE);
+                                match item {
+                                    None => {
+                                        painter.text(rect.center() - egui::vec2(0.0, 14.0), Align2::CENTER_CENTER, "+", egui::FontId::proportional(56.0), Color32::from_gray(90));
+                                        painter.text(rect.center() + egui::vec2(0.0, 30.0), Align2::CENTER_CENTER, "Nowa kartka", egui::FontId::proportional(16.0), Color32::from_gray(70));
+                                        if resp.clicked() {
+                                            out.push(GalleryAction::New);
+                                        }
+                                    }
+                                    Some(p) => {
+                                        if let Some(Some(tex)) = st.thumbs.get(&p.name) {
+                                            egui::Image::new((tex.id(), thumb)).corner_radius(corner).paint_at(ui, rect);
+                                        }
+                                        if resp.clicked() {
+                                            out.push(GalleryAction::Open(p.name.clone()));
+                                        }
+                                    }
                                 }
-                                if ui.button(egui::RichText::new("Usuń na zawsze").color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
-                                    out.push(MenuAction::Delete(p.name.clone()));
-                                    st.confirm_delete = None;
+                                let border = if resp.hovered() { Color32::from_gray(150) } else { Color32::from_gray(205) };
+                                ui.painter().rect_stroke(rect, corner, Stroke::new(1.0, border), egui::StrokeKind::Inside);
+                                if let Some(p) = item {
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.set_width(card_w - 52.0);
+                                            ui.add(egui::Label::new(egui::RichText::new(&p.name).strong()).truncate());
+                                            ui.label(egui::RichText::new(projects::ago(p.modified)).small().weak());
+                                        });
+                                        if ui.add_enabled(!dialog_open, egui::Button::new("•••")).on_hover_text("Opcje").clicked() {
+                                            st.options = Some(p.name.clone());
+                                            st.name_edit = p.name.clone();
+                                            st.confirm_delete = false;
+                                            st.message = None;
+                                        }
+                                    });
                                 }
-                            } else {
-                                if ui.button("Usuń").clicked() {
-                                    st.confirm_delete = Some(p.name.clone());
-                                }
-                                if is_current {
-                                    ui.label(egui::RichText::new("otwarty").small().weak());
-                                } else if ui.button("Otwórz").clicked() {
-                                    out.push(MenuAction::Open(p.name.clone()));
-                                }
-                            }
-                        });
+                            });
+                        }
                     });
-                    ui.separator();
                 }
+                ui.add_space(24.0);
             });
         });
-    if !open {
-        st.open = false;
-        st.confirm_delete = None;
+
+    // Options of one project.
+    if let Some(name) = st.options.clone() {
+        let mut open = true;
+        let width = (ctx.content_rect().width() - 32.0).min(400.0);
+        egui::Window::new("Opcje projektu")
+            .id(egui::Id::unique("project-options"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_TOP, [0.0, safe_top + 80.0])
+            .fixed_size([width, 0.0])
+            .show(&ctx, |ui| {
+                ui.set_width(width - 16.0);
+                ui.label(egui::RichText::new("Nazwa").small().weak());
+                let r = ui.add(egui::TextEdit::singleline(&mut st.name_edit).desired_width(f32::INFINITY));
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let changed = !st.name_edit.trim().is_empty() && st.name_edit.trim() != name;
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add_enabled(changed, egui::Button::new("Zmień nazwę")).clicked() || (enter && changed) {
+                        out.push(GalleryAction::Rename { from: name.clone(), to: st.name_edit.clone() });
+                    }
+                    if ui.button("Duplikuj").clicked() {
+                        out.push(GalleryAction::Duplicate(name.clone()));
+                    }
+                    if st.confirm_delete {
+                        if ui.button(egui::RichText::new("Usuń na zawsze").color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
+                            out.push(GalleryAction::Delete(name.clone()));
+                        }
+                        if ui.button("Nie usuwaj").clicked() {
+                            st.confirm_delete = false;
+                        }
+                    } else if ui.button("Usuń").clicked() {
+                        st.confirm_delete = true;
+                    }
+                });
+                if let Some(m) = &st.message {
+                    ui.label(egui::RichText::new(m).italics());
+                }
+            });
+        if !open {
+            st.options = None;
+        }
     }
     out
 }

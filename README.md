@@ -85,11 +85,14 @@ Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy 
 
 ## Projekty
 
-Przycisk **Menu** otwiera okno projektów: nowa kartka, otwieranie zapisanych projektów, zmiana
-nazwy bieżącego, duplikowanie, usuwanie (z potwierdzeniem) i ręczne „Zapisz”. Każdy projekt to
-osobny plik `Nazwa.icnv` w folderze `projects/` (desktop: `~/.local/share/infinite-canvas/`,
-Android: pamięć wewnętrzna aplikacji). Po uruchomieniu otwiera się ostatnio używany projekt.
-Na Androidzie przycisk „Wstecz” zamyka okno projektów.
+Aplikacja startuje od **galerii projektów**: kafelki z miniaturką, nazwą i datą zmiany oraz kafelek
+„+ Nowa kartka”. Stuknięcie w kafelek otwiera projekt; przycisk **Projekty** na pasku (albo
+„Wstecz” na Androidzie) zapisuje go, odświeża miniaturkę i wraca do galerii. Przycisk „•••” pod
+kafelkiem: zmiana nazwy, duplikowanie, usuwanie (z potwierdzeniem).
+
+Każdy projekt to plik `Nazwa.icnv` + miniaturka `Nazwa.png` w folderze `projects/`
+(desktop: `~/.local/share/infinite-canvas/`, Android: pamięć wewnętrzna aplikacji). Miniaturka
+jest renderowana z wektorów przy wyjściu z projektu i co ~20 s podczas rysowania.
 
 ## Zapis
 

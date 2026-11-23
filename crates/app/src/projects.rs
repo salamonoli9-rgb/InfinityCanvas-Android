@@ -41,6 +41,37 @@ impl Projects {
         self.dir.join(format!("{name}.{EXTENSION}"))
     }
 
+    /// Preview image of a project (PNG next to the drawing).
+    pub fn thumb_path(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.png"))
+    }
+
+    pub fn save_thumbnail(&self, name: &str, w: u32, h: u32, rgba: &[u8]) -> std::io::Result<()> {
+        let path = self.thumb_path(name);
+        let tmp = path.with_extension("png.tmp");
+        {
+            let f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+            let mut enc = png::Encoder::new(f, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut wr = enc.write_header().map_err(std::io::Error::other)?;
+            wr.write_image_data(rgba).map_err(std::io::Error::other)?;
+        }
+        std::fs::rename(tmp, path)
+    }
+
+    /// (width, height, RGBA) of the project's preview, if there is one.
+    pub fn load_thumbnail(&self, name: &str) -> Option<(u32, u32, Vec<u8>)> {
+        let f = std::fs::File::open(self.thumb_path(name)).ok()?;
+        let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+        dec.set_transformations(png::Transformations::EXPAND);
+        let mut r = dec.read_info().ok()?;
+        let mut buf = vec![0; r.output_buffer_size()];
+        let info = r.next_frame(&mut buf).ok()?;
+        buf.truncate(info.buffer_size());
+        (info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight).then_some((info.width, info.height, buf))
+    }
+
     pub fn exists(&self, name: &str) -> bool {
         self.path_for(name).exists()
     }
@@ -91,16 +122,19 @@ impl Projects {
         if src.exists() {
             std::fs::rename(src, self.path_for(&to)).map_err(|e| e.to_string())?;
         }
+        let _ = std::fs::rename(self.thumb_path(from), self.thumb_path(&to));
         Ok(to)
     }
 
     pub fn duplicate(&self, name: &str) -> Result<String, String> {
         let copy = self.unique_name(&format!("{name} (kopia)"));
         std::fs::copy(self.path_for(name), self.path_for(&copy)).map_err(|e| e.to_string())?;
+        let _ = std::fs::copy(self.thumb_path(name), self.thumb_path(&copy));
         Ok(copy)
     }
 
     pub fn delete(&self, name: &str) -> Result<(), String> {
+        let _ = std::fs::remove_file(self.thumb_path(name));
         match std::fs::remove_file(self.path_for(name)) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -178,6 +212,16 @@ mod tests {
         assert_eq!(p.duplicate("Las góry").unwrap(), "Las góry (kopia) 1");
         p.delete("Las góry (kopia) 1").unwrap();
         assert_eq!(p.list().len(), 3);
+
+        // Thumbnails follow their project.
+        let px: Vec<u8> = (0..64 * 2 * 4).map(|i| i as u8).collect();
+        p.save_thumbnail("Las góry", 64, 2, &px).unwrap();
+        assert_eq!(p.load_thumbnail("Las góry"), Some((64, 2, px.clone())));
+        assert_eq!(p.rename("Las góry", "Góry").unwrap(), "Góry");
+        assert!(p.load_thumbnail("Góry").is_some() && p.load_thumbnail("Las góry").is_none());
+        p.delete("Góry").unwrap();
+        assert!(!p.thumb_path("Góry").exists());
+        assert_eq!(p.list().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 

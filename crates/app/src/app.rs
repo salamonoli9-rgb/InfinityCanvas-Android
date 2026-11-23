@@ -21,6 +21,16 @@ const PAN_DECAY: f64 = 4.0;
 const ZOOM_DECAY: f64 = 6.0;
 /// Minimum distance between stored samples, in local units (≈ px at drawing time).
 const MIN_SAMPLE_DIST: f32 = 0.4;
+/// Preview width in px (multiple of 64 for the GPU readback).
+const THUMB_W: u32 = 256;
+/// Minimum time between automatic preview refreshes while drawing.
+const THUMB_INTERVAL: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Gallery,
+    Canvas,
+}
 
 struct ActiveStroke {
     stroke: Stroke,
@@ -76,7 +86,14 @@ pub struct CanvasApp {
     projects: Option<Projects>,
     /// Name of the open project (empty in single-file mode).
     pub project: String,
-    menu: ui::MenuState,
+    gallery: ui::GalleryState,
+    /// Gallery (start screen) or an open project.
+    pub screen: Screen,
+    /// "Projects" was pressed: leave the canvas on the next frame (needs the renderer).
+    want_gallery: bool,
+    /// When the last preview was rendered (previews are refreshed now and then while drawing).
+    last_thumb: Instant,
+    thumb_due: bool,
     save_thread: Option<std::thread::JoinHandle<()>>,
     /// Set when a different document was loaded: cached meshes are keyed by stroke id.
     clear_render_cache: bool,
@@ -168,14 +185,18 @@ impl CanvasApp {
             stats: FrameStats::default(),
             projects: None,
             project: String::new(),
-            menu: ui::MenuState::default(),
+            gallery: ui::GalleryState::default(),
+            screen: Screen::Canvas,
+            want_gallery: false,
+            last_thumb: Instant::now(),
+            thumb_due: false,
             save_thread: None,
             clear_render_cache: false,
         }
         .with_touch_style()
     }
 
-    /// Opens the projects folder in `data_dir` and the last used project (or a new one).
+    /// Opens the projects folder in `data_dir` and starts on the projects gallery.
     pub fn with_projects(data_dir: &Path) -> Self {
         let projects = match Projects::new(data_dir) {
             Ok(p) => p,
@@ -184,33 +205,25 @@ impl CanvasApp {
                 return Self::new(Some(data_dir.join("canvas.icnv")));
             }
         };
-        let name = projects
-            .last()
-            .or_else(|| projects.list().first().map(|p| p.name.clone()))
-            .unwrap_or_else(|| projects.new_name());
-        projects.set_last(&name);
-        let mut app = Self::new(Some(projects.path_for(&name)));
-        if !projects.exists(&name) {
-            // Create the file so the project is listed even before anything is drawn.
-            app.dirty = true;
-            app.save_now();
-        }
-        log::info!("project {name:?}");
-        app.project = name;
+        let mut app = Self::new(None);
         app.projects = Some(projects);
+        app.screen = Screen::Gallery;
+        app.refresh_gallery();
         app
     }
 
     /// Replaces the open document with the file at `path` (empty if it doesn't exist).
-    fn load_document(&mut self, path: PathBuf) {
+    fn load_document(&mut self, path: Option<PathBuf>) {
         self.save_now();
-        let (doc, camera) = match io::load_file(&path) {
-            Ok(dc) => dc,
-            Err(io::LoadError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (Document::new(), Camera::default()),
-            Err(e) => {
-                log::error!("could not load {}: {e}", path.display());
-                let _ = std::fs::rename(&path, path.with_extension("broken"));
-                self.menu.message = Some(format!("Plik był uszkodzony: {e}"));
+        let (doc, camera) = match path.as_deref().map(io::load_file) {
+            None => (Document::new(), Camera::default()),
+            Some(Ok(dc)) => dc,
+            Some(Err(io::LoadError::Io(e))) if e.kind() == std::io::ErrorKind::NotFound => (Document::new(), Camera::default()),
+            Some(Err(e)) => {
+                let p = path.as_ref().expect("some");
+                log::error!("could not load {}: {e}", p.display());
+                let _ = std::fs::rename(p, p.with_extension("broken"));
+                self.gallery.message = Some(format!("Plik był uszkodzony: {e}"));
                 (Document::new(), Camera::default())
             }
         };
@@ -220,101 +233,140 @@ impl CanvasApp {
         self.active = None;
         self.erasing = None;
         self.inertia = Inertia::default();
-        self.save_path = Some(path);
+        self.save_path = path;
         self.dirty = false;
         self.clear_render_cache = true;
         self.wants_redraw = true;
     }
 
-    fn switch_project(&mut self, name: String) {
-        let Some(path) = self.projects.as_ref().map(|p| p.path_for(&name)) else { return };
-        self.load_document(path);
-        if let Some(p) = &self.projects {
-            p.set_last(&name);
-        }
+    /// Opens a project from the gallery.
+    fn open_project(&mut self, name: String) {
+        let Some(projects) = self.projects.clone() else { return };
+        self.load_document(Some(projects.path_for(&name)));
+        projects.set_last(&name);
+        log::info!("project {name:?}: {} strokes", self.doc.len());
         self.project = name;
+        self.screen = Screen::Canvas;
+        self.last_thumb = Instant::now();
     }
 
-    fn refresh_menu(&mut self) {
-        if let Some(p) = &self.projects {
-            self.menu.list = p.list();
+    /// Saves the open project, renders its preview and shows the gallery.
+    fn leave_to_gallery(&mut self, target: Target, renderer: &mut Renderer) {
+        self.render_thumbnail(target, renderer, false);
+        self.load_document(None);
+        self.gallery.thumbs.remove(&self.project);
+        self.project.clear();
+        self.screen = Screen::Gallery;
+        self.gallery.message = None;
+        self.refresh_gallery();
+    }
+
+    /// Renders what the camera sees into the project's preview PNG.
+    fn render_thumbnail(&mut self, target: Target, renderer: &mut Renderer, background: bool) {
+        let Some(projects) = self.projects.clone() else { return };
+        if self.project.is_empty() {
+            return;
         }
-        self.menu.name_edit = self.project.clone();
+        self.last_thumb = Instant::now();
+        let (w, h) = (THUMB_W, (THUMB_W as f32 * ui::THUMB_ASPECT) as u32);
+        let mut cam = self.camera.clone();
+        // Same horizontal extent as the screen, centred on the same point.
+        cam.log_zoom += (w as f64 / self.viewport[0]).log2();
+        let vp = [w as f64, h as f64];
+        let visible = self.doc.query(&cam, vp, [0.0, 0.0, vp[0], vp[1]]);
+        let (device, queue, format) = target.device_queue_format();
+        let px = renderer.render_rgba(
+            device,
+            queue,
+            format,
+            [w, h],
+            FrameInput {
+                visible: &visible,
+                doc: &self.doc,
+                active: None,
+                log_zoom: cam.log_zoom,
+                background: BACKGROUND,
+                egui: None,
+                textures: Default::default(),
+            },
+        );
+        if px.len() != (w * h * 4) as usize {
+            return;
+        }
+        let name = self.project.clone();
+        let save = move || {
+            if let Err(e) = projects.save_thumbnail(&name, w, h, &px) {
+                log::warn!("preview of {name:?} not saved: {e}");
+            }
+        };
+        if background {
+            std::thread::spawn(save);
+        } else {
+            save();
+        }
     }
 
-    fn menu_action(&mut self, a: ui::MenuAction) {
-        use ui::MenuAction::*;
+    fn refresh_gallery(&mut self) {
+        if let Some(p) = &self.projects {
+            self.gallery.list = p.list();
+        }
+    }
+
+    pub fn gallery_action(&mut self, a: ui::GalleryAction) {
+        use ui::GalleryAction::*;
         let Some(projects) = self.projects.clone() else { return };
         match a {
             New => {
-                self.save_now();
                 let name = projects.new_name();
-                self.switch_project(name.clone());
-                // Write the empty file right away so the project shows up in the list.
-                self.dirty = true;
-                self.save_now();
-                self.menu.message = Some(format!("Nowa kartka „{name}”"));
-                self.menu.open = false;
-            }
-            Open(name) => {
-                self.switch_project(name);
-                self.menu.message = None;
-                self.menu.open = false;
-            }
-            Rename(to) => {
-                self.save_now();
-                match projects.rename(&self.project, &to) {
-                    Ok(name) => {
-                        self.save_path = Some(projects.path_for(&name));
-                        projects.set_last(&name);
-                        self.menu.message = Some(format!("Zmieniono nazwę na „{name}”"));
-                        self.project = name;
-                    }
-                    Err(e) => self.menu.message = Some(e),
+                if let Err(e) = io::save_file(&projects.path_for(&name), &Document::new(), &Camera::default()) {
+                    self.gallery.message = Some(format!("Nie udało się utworzyć kartki: {e}"));
+                } else {
+                    self.open_project(name);
                 }
             }
-            Duplicate => {
-                self.dirty = true;
-                self.save_now();
-                let res = projects.duplicate(&self.project);
-                self.menu.message = Some(match res {
+            Open(name) => self.open_project(name),
+            Rename { from, to } => match projects.rename(&from, &to) {
+                Ok(name) => {
+                    self.gallery.thumbs.remove(&from);
+                    self.gallery.options = None;
+                    self.gallery.message = Some(format!("Zmieniono nazwę na „{name}”"));
+                }
+                Err(e) => self.gallery.message = Some(e),
+            },
+            Duplicate(name) => {
+                self.gallery.options = None;
+                self.gallery.message = Some(match projects.duplicate(&name) {
                     Ok(copy) => format!("Utworzono kopię „{copy}”"),
                     Err(e) => format!("Nie udało się skopiować: {e}"),
                 });
             }
             Delete(name) => {
-                if name == self.project {
-                    self.wait_for_save();
-                    self.dirty = false;
-                }
-                if let Err(e) = projects.delete(&name) {
-                    self.menu.message = Some(format!("Nie udało się usunąć: {e}"));
-                } else {
-                    self.menu.message = Some(format!("Usunięto „{name}”"));
-                    if name == self.project {
-                        let next = projects.list().first().map(|p| p.name.clone()).unwrap_or_else(|| projects.new_name());
-                        self.dirty = false;
-                        self.switch_project(next);
-                    }
-                }
-            }
-            Save => {
-                self.dirty = true;
-                self.save_now();
-                self.menu.message = Some("Zapisano".into());
+                self.gallery.options = None;
+                self.gallery.thumbs.remove(&name);
+                self.gallery.message = Some(match projects.delete(&name) {
+                    Ok(()) => format!("Usunięto „{name}”"),
+                    Err(e) => format!("Nie udało się usunąć: {e}"),
+                });
             }
         }
-        self.refresh_menu();
+        self.refresh_gallery();
     }
 
-    /// System "back": closes the projects window. Returns whether it was handled.
+    /// System "back": from a project to the gallery, or closes a dialog.
+    /// Returns whether it was handled (otherwise the app may close).
     pub fn back(&mut self) -> bool {
-        if self.menu.open {
-            self.menu.open = false;
-            self.wants_redraw = true;
-            return true;
+        self.wants_redraw = true;
+        match self.screen {
+            Screen::Canvas if self.projects.is_some() => {
+                self.want_gallery = true;
+                true
+            }
+            Screen::Gallery if self.gallery.options.is_some() => {
+                self.gallery.options = None;
+                true
+            }
+            _ => false,
         }
-        false
     }
 
     fn wait_for_save(&mut self) {
@@ -565,6 +617,7 @@ impl CanvasApp {
             // Encoding is fast; the disk write happens off the UI thread.
             let bytes = io::encode(&self.doc, &self.camera);
             self.dirty = false;
+            self.thumb_due = true;
             self.wait_for_save();
             self.save_thread = Some(std::thread::spawn(move || {
                 let tmp = path.with_extension("tmp");
@@ -618,6 +671,10 @@ impl CanvasApp {
             }
         }
 
+        if std::mem::take(&mut self.want_gallery) && self.screen == Screen::Canvas {
+            self.leave_to_gallery(target, renderer);
+        }
+
         // UI.
         let info = ui::Info {
             can_undo: self.history.can_undo(),
@@ -626,25 +683,24 @@ impl CanvasApp {
             strokes: self.doc.len(),
         };
         let mut actions = ui::Actions::default();
-        let mut menu_actions = Vec::new();
+        let mut gallery_actions = Vec::new();
         let mut rects = Vec::new();
         let ctx = self.egui_ctx.clone();
         let output = ctx.run_ui(raw_input, |ui| {
-            let (a, mut r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
-            if a.menu {
-                self.menu.open = !self.menu.open;
-                self.menu.message = None;
-                self.menu.confirm_delete = None;
-                if let Some(p) = &self.projects {
-                    self.menu.list = p.list();
+            if self.screen == Screen::Gallery {
+                if let Some(projects) = &self.projects {
+                    let bg = egui::Color32::from_rgb(
+                        (BACKGROUND[0] * 255.0) as u8,
+                        (BACKGROUND[1] * 255.0) as u8,
+                        (BACKGROUND[2] * 255.0) as u8,
+                    );
+                    gallery_actions = ui::gallery(ui, &mut self.gallery, projects, self.safe_top, bg);
                 }
-                self.menu.name_edit = self.project.clone();
+                // The canvas takes no input on the gallery screen.
+                rects.push(egui::Rect::EVERYTHING);
+                return;
             }
-            menu_actions = ui::projects_window(ui.ctx(), &mut self.menu, &self.project, self.safe_top);
-            if self.menu.open {
-                // The canvas is inert while the projects window is open.
-                r.push(egui::Rect::EVERYTHING);
-            }
+            let (a, r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
             actions = a;
             rects = r;
             if let Some(er) = &self.erasing {
@@ -666,13 +722,21 @@ impl CanvasApp {
         if actions.home {
             self.go_home();
         }
-        for a in menu_actions {
-            self.menu_action(a);
+        if actions.menu && self.projects.is_some() {
+            self.want_gallery = true;
+            self.wants_redraw = true;
+        }
+        for a in gallery_actions {
+            self.gallery_action(a);
         }
         if std::mem::take(&mut self.clear_render_cache) {
             renderer.clear_cache();
         }
         self.autosave();
+        if self.thumb_due && self.screen == Screen::Canvas && self.last_thumb.elapsed() >= THUMB_INTERVAL {
+            self.thumb_due = false;
+            self.render_thumbnail(target, renderer, true);
+        }
 
         // Scene.
         let full = [0.0, 0.0, self.viewport[0], self.viewport[1]];
@@ -707,7 +771,7 @@ impl CanvasApp {
 mod tests {
     use super::*;
     use crate::gestures::{MouseButton, Phase};
-    use crate::ui::MenuAction;
+    use crate::ui::GalleryAction;
 
     fn draw(app: &mut CanvasApp, y: f64) {
         let ev = |phase, x: f64, t: f64| PointerEvent {
@@ -732,36 +796,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut app = CanvasApp::with_projects(&dir);
         app.resize([800, 600]);
-        assert_eq!(app.project, "Rysunek 1");
+        // Starts on the gallery with nothing open.
+        assert_eq!(app.screen, Screen::Gallery);
+        assert!(app.gallery.list.is_empty());
+
+        app.gallery_action(GalleryAction::New);
+        assert_eq!((app.screen, app.project.as_str()), (Screen::Canvas, "Rysunek 1"));
         draw(&mut app, 300.0);
         assert_eq!(app.doc.len(), 1);
+        // Leaving without a renderer (the preview needs the GPU; covered by the offscreen test).
+        app.load_document(None);
+        app.project.clear();
+        app.screen = Screen::Gallery;
+        app.refresh_gallery();
 
-        app.menu_action(MenuAction::New);
+        app.gallery_action(GalleryAction::New);
         assert_eq!(app.project, "Rysunek 2");
         assert!(app.doc.is_empty() && !app.history.can_undo());
         draw(&mut app, 100.0);
         draw(&mut app, 200.0);
+        app.load_document(None);
+        app.screen = Screen::Gallery;
+        app.refresh_gallery();
+        assert_eq!(app.gallery.list.len(), 2);
 
-        app.menu_action(MenuAction::Open("Rysunek 1".into()));
-        assert_eq!(app.doc.len(), 1);
-        app.menu_action(MenuAction::Rename("Szkice".into()));
-        assert_eq!(app.project, "Szkice");
-        app.menu_action(MenuAction::Duplicate);
-        let names: Vec<String> = app.menu.list.iter().map(|p| p.name.clone()).collect();
+        app.gallery_action(GalleryAction::Rename { from: "Rysunek 1".into(), to: "Szkice".into() });
+        app.gallery_action(GalleryAction::Duplicate("Szkice".into()));
+        let names: Vec<String> = app.gallery.list.iter().map(|p| p.name.clone()).collect();
         assert_eq!(names.len(), 3, "{names:?}");
         assert!(names.contains(&"Szkice (kopia)".to_string()));
+        app.gallery_action(GalleryAction::Delete("Szkice".into()));
+        assert_eq!(app.gallery.list.len(), 2);
 
-        // Deleting the open project switches to another one.
-        app.menu_action(MenuAction::Delete("Szkice".into()));
-        assert_ne!(app.project, "Szkice");
-        assert_eq!(app.menu.list.len(), 2);
-
-        // Reopening the app comes back to the last project, with its strokes.
-        app.menu_action(MenuAction::Open("Rysunek 2".into()));
-        app.save_now();
-        let again = CanvasApp::with_projects(&dir);
-        assert_eq!(again.project, "Rysunek 2");
-        assert_eq!(again.doc.len(), 2);
+        app.gallery_action(GalleryAction::Open("Szkice (kopia)".into()));
+        assert_eq!(app.doc.len(), 1);
+        app.gallery_action(GalleryAction::Open("Rysunek 2".into()));
+        assert_eq!(app.doc.len(), 2);
+        assert!(app.back() && app.want_gallery);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -10,6 +10,7 @@ canvas_core = { version = "0.1.0", path = "../core" }
 egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 log = "0.4.35"
+png = "0.17"
 pollster = "1.0.3"
 wgpu = "30"
 
