@@ -30,6 +30,8 @@ pub struct ToolState {
     widths: HashMap<Brush, f32>,
     /// Text height in logical points.
     pub text_size: f32,
+    /// Show the canvas grid (shape guides snap to it).
+    pub show_grid: bool,
     /// Sample of how each brush draws (shown in the brush menu), and the colour they were made in.
     pub previews: HashMap<Brush, egui::TextureHandle>,
     pub previews_color: Option<Color32>,
@@ -84,6 +86,7 @@ impl Default for ToolState {
             previews: HashMap::new(),
             previews_color: None,
             text_size: 32.0,
+            show_grid: false,
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
             eraser: 24.0,
@@ -129,6 +132,8 @@ pub struct Actions {
     pub layers: bool,
     /// Start / stop recording a video of the canvas.
     pub record: bool,
+    /// The grid was switched on or off.
+    pub grid_changed: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -238,9 +243,12 @@ fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
 }
 
 /// "More": photos, bookmarks, export.
-fn photos_button(ui: &mut egui::Ui, a: &mut Actions) {
+fn photos_button(ui: &mut egui::Ui, a: &mut Actions, s: &mut ToolState) {
     egui::containers::menu::MenuButton::from_button(egui::Button::new("Więcej")).ui(ui, |ui| {
         ui.set_min_width(190.0);
+        if ui.checkbox(&mut s.show_grid, "Siatka (kształty się przyciągają)").changed() {
+            a.grid_changed = true;
+        }
         if ui.button("Zdjęcia…").clicked() {
             a.photos = true;
             ui.close();
@@ -326,7 +334,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                 ui.horizontal_wrapped(|ui| {
                     colors(ui, s);
                     hand_button(ui, s);
-                    photos_button(ui, &mut a);
+                    photos_button(ui, &mut a, s);
                 });
                 ui.horizontal(|ui| {
                     ui.spacing_mut().slider_width = ui.spacing().slider_width.min(90.0);
@@ -349,7 +357,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     ui.separator();
                     history_buttons(ui, info, &mut a);
                     home_button(ui, &mut a);
-                    photos_button(ui, &mut a);
+                    photos_button(ui, &mut a, s);
                     ui.separator();
                     rotation_button(ui, info, &mut a);
                     zoom_label(ui, info);

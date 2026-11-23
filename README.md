@@ -155,6 +155,13 @@ komputerze przez `ffmpeg` do `~/Wideo/Nieskończone płótno/`. Postęp widać n
 i okien), 30 kl./s, 768 px szerokości. Czerwony przycisk w prawym górnym rogu pokazuje czas;
 stuknięcie kończy nagrywanie. Film trafia tam, gdzie wideo z zakładek (galeria → Filmy).
 
+### Siatka
+
+**Więcej → Siatka**: kratka przyczepiona do płótna (obraca się z nim), zawsze 24–48 pt na ekranie –
+przy oddalaniu/przybliżaniu przechodzi na rzadszą/gęstszą (co 4. linia mocniejsza), dokładna na każdej
+głębokości. Gdy jest włączona, linie, prostokąty i elipsy przyciągają rogi do jej przecięć. Siatki nie
+ma w eksportach.
+
 ### Eksport
 
 **Więcej → Eksport do PNG** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej

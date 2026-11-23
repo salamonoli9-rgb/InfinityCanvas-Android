@@ -1189,3 +1189,44 @@ fn vector_text() {
     app.undo();
     assert_eq!(app.doc.len(), 0);
 }
+
+#[test]
+fn grid_and_snapping() {
+    use infinite_canvas::shapes::Shape;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    let vp = [W as f64, H as f64];
+    let plain = gpu.frame(&mut app);
+    app.tools.show_grid = true;
+    app.toggle_grid_changed();
+    let px = gpu.frame(&mut app);
+    // Somewhere below the toolbar, grid lines darken the paper.
+    let darker = (130..H).flat_map(|y| (0..W).step_by(7).map(move |x| (x, y))).filter(|&(x, y)| {
+        let i = ((y * W + x) * 4) as usize;
+        (plain[i] as i32 - px[i] as i32) > 6
+    }).count();
+    assert!(darker > 200, "grid visible ({darker} px)");
+    // A rectangle drawn slightly off lands on grid crossings.
+    app.tools.shape = Some(Shape::Rectangle);
+    draw_path(&mut app, &[[301.0, 157.0], [489.0, 263.0]], 5.0);
+    let g = infinite_canvas::grid::Grid::new(&app.camera, vp, 1.0);
+    let s = app.doc.strokes().next().unwrap();
+    let f = app.camera.level_frame(s.level, vp);
+    let o = f.anchor_to_screen(&s.anchor, s.cache.anchor_fast);
+    for p in &s.points {
+        let v = f.local_vec_to_screen([p.x as f64, p.y as f64]);
+        let q = [o[0] + v[0], o[1] + v[1]];
+        let snapped = g.snap(q);
+        assert!((snapped[0] - q[0]).abs() < 0.01 && (snapped[1] - q[1]).abs() < 0.01, "corner {q:?} is on the grid");
+    }
+    // Off again: the paper is plain.
+    app.tools.show_grid = false;
+    app.toggle_grid_changed();
+    app.undo();
+    let px = gpu.frame(&mut app);
+    let i = ((200 * W + 100) * 4) as usize;
+    assert_eq!(&px[i..i + 3], &plain[i..i + 3]);
+}

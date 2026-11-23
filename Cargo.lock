@@ -1282,6 +1282,7 @@ dependencies = [
  "log",
  "ndk",
  "num-bigint",
+ "num-traits",
  "png 0.17.16",
  "pollster",
  "raw-window-handle",

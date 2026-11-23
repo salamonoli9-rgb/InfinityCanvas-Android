@@ -311,6 +311,7 @@ pub fn brush_sample(target: Target, renderer: &mut Renderer, brush: Brush, color
             active: None,
             scene: None,
             images: &[],
+            grid: &[],
             layer_opacity: &[1.0],
             urgent: &[],
             log_zoom: 0.0,
@@ -522,6 +523,7 @@ impl CanvasApp {
                 active: None,
                 scene: None,
                 images: &images,
+                grid: &[],
                 layer_opacity: &layer_opacity,
                 urgent: &[],
                 log_zoom: cam.log_zoom,
@@ -1014,6 +1016,12 @@ impl CanvasApp {
         &self.selection
     }
 
+    /// The grid setting changed (it is part of the cached scene).
+    pub fn toggle_grid_changed(&mut self) {
+        self.content_rev += 1;
+        self.wants_redraw = true;
+    }
+
     /// Places `text` with its top-left corner at screen point `pos`, `size` px tall, as one
     /// filled vector shape (letters with their holes) in the current colour.
     pub fn add_text(&mut self, text: &str, pos: [f64; 2], size: f64) -> bool {
@@ -1144,6 +1152,7 @@ impl CanvasApp {
                         active: None,
                         scene: None,
                         images: &images,
+                        grid: &[],
                         layer_opacity: &layer_opacity,
                         urgent: &[],
                         log_zoom: cam.log_zoom,
@@ -1235,6 +1244,7 @@ impl CanvasApp {
                 active: None,
                 scene: None,
                 images: &images,
+                grid: &[],
                 layer_opacity: &layer_opacity,
                 urgent: &[],
                 log_zoom: cam.log_zoom,
@@ -1284,6 +1294,7 @@ impl CanvasApp {
                 active: None,
                 scene: None,
                 images: &[],
+                grid: &[],
                 layer_opacity: &layer_opacity,
                 urgent: &[],
                 log_zoom: cam.log_zoom,
@@ -1681,7 +1692,14 @@ impl CanvasApp {
     fn extend_stroke(&mut self, pos: [f64; 2], pressure: f32, time: f64, kind: PointerKind) {
         let Some(a) = self.active.as_mut() else { return };
         if let Some((shape, start)) = a.shape {
-            // A shape is rebuilt from its start to the pointer on every move.
+            // A shape is rebuilt from its start to the pointer on every move; with the grid on,
+            // its corners sit on grid crossings.
+            let (start, pos) = if self.tools.show_grid {
+                let g = crate::grid::Grid::new(&self.camera, self.viewport, self.pixels_per_point as f64);
+                (g.snap(start), g.snap(pos))
+            } else {
+                (start, pos)
+            };
             let frame = self.camera.level_frame(a.stroke.level, self.viewport);
             a.stroke.points = crate::shapes::points(shape, start, pos)
                 .into_iter()
@@ -2048,6 +2066,11 @@ impl CanvasApp {
             Some(ui::TextAction::Cancel) => self.text_panel.open = false,
             None => {}
         }
+        if actions.grid_changed {
+            // The grid is part of the cached scene.
+            self.content_rev += 1;
+            self.wants_redraw = true;
+        }
         if actions.record || stop_recording {
             self.toggle_recording();
         }
@@ -2173,6 +2196,7 @@ impl CanvasApp {
                     predicted: None,
                 }
             });
+            let grid = if self.tools.show_grid { crate::grid::Grid::new(&self.camera, cvp, self.pixels_per_point as f64).lines(cvp) } else { Vec::new() };
             renderer.render_scene_cache(
                 device,
                 queue,
@@ -2184,6 +2208,7 @@ impl CanvasApp {
                     active,
                     scene: None,
                     images: &images,
+                    grid: &grid,
                     layer_opacity: &layer_opacity,
                     urgent: &urgent,
                     log_zoom: self.camera.log_zoom,
@@ -2249,6 +2274,7 @@ impl CanvasApp {
                 active,
                 scene,
                 images: &[],
+                grid: &[],
                 layer_opacity: &layer_opacity,
                 urgent: &[],
                 log_zoom: self.camera.log_zoom,
@@ -2282,6 +2308,7 @@ impl CanvasApp {
                         active,
                         scene: scene.map(|c| c.map(|p| [p[0] * k, p[1] * k])),
                         images: &[],
+                        grid: &[],
                         layer_opacity: &layer_opacity,
                         urgent: &[],
                         log_zoom: self.camera.log_zoom + k.log2(),

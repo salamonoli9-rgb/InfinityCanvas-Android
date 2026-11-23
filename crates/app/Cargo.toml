@@ -12,6 +12,7 @@ egui-wgpu = "0.37"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 log = "0.4.35"
 num-bigint = "0.5"
+num-traits = "0.2"
 png = "0.17"
 pollster = "1.0.3"
 ttf-parser = "0.25"

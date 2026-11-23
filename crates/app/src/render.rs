@@ -266,6 +266,8 @@ pub struct FrameInput<'a> {
     pub scene: Option<[[f64; 2]; 4]>,
     /// Reference photos to draw below the strokes, bottom first.
     pub images: &'a [ImageDraw<'a>],
+    /// Grid lines (from, to, strong) in screen px, drawn on the background.
+    pub grid: &'a [([f64; 2], [f64; 2], bool)],
     /// Strokes added this frame (just drawn): tessellated right away, whatever the budget, so
     /// a finished stroke never blinks out.
     pub urgent: &'a [StrokeId],
@@ -288,6 +290,8 @@ struct SceneCache {
 
 /// Image id used for the scene cache quad.
 const SCENE_CACHE_ID: u64 = u64::MAX;
+/// Image id used for the grid lines.
+const GRID_ID: u64 = u64::MAX - 1;
 
 /// Per-size render targets: strokes are drawn with MSAA into a transparent layer (so the
 /// eraser can clear pixels), which is then put over the background on the screen.
@@ -319,6 +323,10 @@ pub struct Renderer {
     image_bgl: wgpu::BindGroupLayout,
     image_sampler: wgpu::Sampler,
     image_textures: HashMap<u64, ImageTexture>,
+    /// A 1×1 grey texture: grid lines are drawn as thin image quads.
+    grid_bind_group: wgpu::BindGroup,
+    grid_texture: wgpu::Texture,
+    grid_ready: bool,
     image_vbuf: wgpu::Buffer,
     image_v_cap: u64,
     uniform_buf: wgpu::Buffer,
@@ -578,6 +586,26 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
+        let grid_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("grid"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let grid_view = grid_tex.create_view(&Default::default());
+        let grid_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grid"),
+            layout: &image_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&grid_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&image_sampler) },
+            ],
+        });
+        // (The texel is written on the first frame, when a queue is at hand.)
         // egui is drawn in the (single-sampled) screen pass; it antialiases by itself.
         let egui = egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions { msaa_samples: 1, ..Default::default() });
         let mk = |label, size, usage| {
@@ -596,6 +624,9 @@ impl Renderer {
             image_bgl,
             image_sampler,
             image_textures: HashMap::new(),
+            grid_bind_group,
+            grid_texture: grid_tex,
+            grid_ready: false,
             image_vbuf: mk("image v", 256 * std::mem::size_of::<ImageVertex>() as u64, vu),
             image_v_cap: 256,
             uniform_buf,
@@ -1086,6 +1117,34 @@ impl Renderer {
         let mut image_v: Vec<ImageVertex> = Vec::new();
         let mut image_draws: Vec<(u64, u32, u32)> = Vec::new();
         let guard = [-vp[0], -vp[1], 2.0 * vp[0], 2.0 * vp[1]];
+        // Grid lines first (they lie on the background).
+        if !input.grid.is_empty() {
+            if !self.grid_ready {
+                queue.write_texture(
+                    self.grid_texture.as_image_copy(),
+                    &[90, 90, 100, 255],
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+                    wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                );
+                self.grid_ready = true;
+            }
+            let first = image_v.len() as u32;
+            let half = (vp[0].max(vp[1]) / 1400.0).max(0.6);
+            for (a, b, strong) in input.grid {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let l = dx.hypot(dy).max(1e-9);
+                let n = [-dy / l * half, dx / l * half];
+                let quad = [[a[0] + n[0], a[1] + n[1], 0.5, 0.5], [b[0] + n[0], b[1] + n[1], 0.5, 0.5], [b[0] - n[0], b[1] - n[1], 0.5, 0.5], [a[0] - n[0], a[1] - n[1], 0.5, 0.5]];
+                let poly = clip_polygon4(&quad, guard);
+                let opacity = if *strong { 0.32 } else { 0.13 };
+                for k in 1..poly.len().saturating_sub(1) {
+                    for q in [poly[0], poly[k], poly[k + 1]] {
+                        image_v.push(ImageVertex { pos: [q[0] as f32, q[1] as f32], uv: [0.5, 0.5], opacity });
+                    }
+                }
+            }
+            image_draws.push((GRID_ID, first, image_v.len() as u32));
+        }
         if let (Some(c), true) = (input.scene, self.scene_cache.is_some()) {
             let quad = [[c[0][0], c[0][1], 0.0, 0.0], [c[1][0], c[1][1], 1.0, 0.0], [c[2][0], c[2][1], 1.0, 1.0], [c[3][0], c[3][1], 0.0, 1.0]];
             let poly = clip_polygon4(&quad, guard);
@@ -1244,6 +1303,8 @@ impl Renderer {
                 for (id, a, b) in &image_draws {
                     let bg = if *id == SCENE_CACHE_ID {
                         &self.scene_cache.as_ref().expect("checked").bind_group
+                    } else if *id == GRID_ID {
+                        &self.grid_bind_group
                     } else {
                         &self.image_textures[id].bind_group
                     };
