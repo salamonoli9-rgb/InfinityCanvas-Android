@@ -78,7 +78,9 @@ Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
 
 ### Pędzle
 
-Przycisk z nazwą pędzla na pasku otwiera listę. Każdy pędzel pamięta własną grubość.
+Przycisk z nazwą pędzla na pasku otwiera listę – przy każdym pędzlu jest próbka, jak rysuje
+(w aktualnym kolorze, renderowana tym samym silnikiem co rysunek). Każdy pędzel pamięta własną
+grubość.
 
 | Pędzel | Działanie |
 |---|---|
@@ -89,6 +91,13 @@ Przycisk z nazwą pędzla na pasku otwiera listę. Każdy pędzel pamięta włas
 | Ołówek miękki / twardy | półprzezroczysty, z ziarnem papieru; nacisk = ciemniej |
 | Marker | półprzezroczysty, ścięta końcówka, nakładane kreski ciemnieją |
 | Kropkowana | kropki co ~2 grubości |
+| Długopis | cienki, równy |
+| Pędzel | mocno reaguje na nacisk, zwężone końce |
+| Kredka / Węgiel | grube ziarno, nacisk = ciemniej |
+| Zakreślacz | szeroki, przezroczysty, ścięty |
+| Aerograf | miękkie, rozmyte brzegi |
+| Akwarela | przezroczysta, miękka, ciemniejszy brzeg, lekka faktura |
+| Spray | rozproszone kropki (te same przy każdym zoomie) |
 | Wypełnienie | **stuknięcie** = wiadro z farbą: wypełnia obszar zamknięty kreskami (omija wyspy w środku); **przeciągnięcie** = rysuje wypełniony kształt |
 
 W tym samym menu jest **Kształt**: Odręcznie / Linia / Prostokąt / Elipsa – przeciągnięcie od

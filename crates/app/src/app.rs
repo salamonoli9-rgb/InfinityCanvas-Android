@@ -252,6 +252,60 @@ const MOVE_SETTLE: Duration = Duration::from_millis(150);
 /// While moving, the cache is re-rendered at most this often (and only when needed).
 const CACHE_REFRESH: Duration = Duration::from_millis(250);
 
+/// Size of a brush sample in the brush menu, px.
+pub const SAMPLE_SIZE: [u32; 2] = [192, 48];
+
+/// RGBA pixels of a sample stroke of `brush`: a wave with pressure swelling in the middle
+/// (a blob for the fill brush), drawn by the real renderer.
+pub fn brush_sample(target: Target, renderer: &mut Renderer, brush: Brush, color: [u8; 4]) -> Vec<u8> {
+    let [w, h] = SAMPLE_SIZE;
+    let (device, queue, format) = target.device_queue_format();
+    let vp = [w as f64, h as f64];
+    let cam = Camera::default();
+    let mut doc = Document::new();
+    // Local units = screen px here (level 0, zoom 1); the origin is the screen centre.
+    let width = (brush.default_width() * 1.1).clamp(1.5, 18.0);
+    // Ids far from real strokes', one per brush: the renderer caches meshes by stroke id.
+    let id = u64::MAX - 64 - Brush::ALL.iter().position(|b| *b == brush).unwrap_or(0) as u64;
+    let mut s = Stroke::new(id, 0, [num_bigint::BigInt::from(0), num_bigint::BigInt::from(0)], color, width);
+    s.brush = brush;
+    let n = 64;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let (x, y) = if brush == Brush::Fill {
+            let a = t * std::f32::consts::TAU;
+            (60.0 * a.cos(), 15.0 * a.sin())
+        } else {
+            (-82.0 + 164.0 * t, 9.0 * (t * std::f32::consts::TAU * 1.2).sin())
+        };
+        let pressure = 0.15 + 0.85 * (t * std::f32::consts::PI).sin();
+        s.push(StrokePoint { x, y, pressure });
+    }
+    s.refresh_cache();
+    doc.insert(s);
+    let visible = doc.query(&cam, vp, [0.0, 0.0, vp[0], vp[1]]);
+    renderer.render_rgba(
+        device,
+        queue,
+        format,
+        [w, h],
+        FrameInput {
+            visible: &visible,
+            doc: &doc,
+            active: None,
+            scene: None,
+            images: &[],
+            layer_opacity: &[1.0],
+            urgent: &[],
+            log_zoom: 0.0,
+            rotation: [1.0, 0.0],
+            background: BACKGROUND,
+            egui: None,
+            textures: Default::default(),
+        },
+    )
+}
+
 /// How to turn a photo into a drawing.
 #[derive(Clone, Copy, Debug)]
 pub struct DrawingOptions {
@@ -566,6 +620,9 @@ impl CanvasApp {
     /// surface loss): the new renderer has no textures, and a fresh context re-uploads them.
     pub fn reset_ui(&mut self) {
         self.egui_ctx = egui::Context::default();
+        // Textures belonged to the old context.
+        self.tools.previews.clear();
+        self.tools.previews_color = None;
         self.apply_style();
     }
 
@@ -1031,6 +1088,21 @@ impl CanvasApp {
     /// Saves the current view as a bookmark.
     pub fn add_bookmark(&mut self) {
         self.bookmark_action(ui::BookmarkAction::Add);
+    }
+
+    /// Renders a small sample of every brush (for the brush menu) in the current colour.
+    fn make_brush_previews(&mut self, target: Target, renderer: &mut Renderer) {
+        let c = self.tools.color;
+        self.tools.previews.clear();
+        for brush in Brush::ALL {
+            let px = brush_sample(target, renderer, brush, [c.r(), c.g(), c.b(), 255]);
+            if px.len() == (SAMPLE_SIZE[0] * SAMPLE_SIZE[1] * 4) as usize {
+                let img = egui::ColorImage::from_rgba_unmultiplied([SAMPLE_SIZE[0] as usize, SAMPLE_SIZE[1] as usize], &px);
+                let tex = self.egui_ctx.load_texture(format!("brush:{brush:?}"), img, egui::TextureOptions::LINEAR);
+                self.tools.previews.insert(brush, tex);
+            }
+        }
+        self.tools.previews_color = Some(self.tools.color);
     }
 
     /// Exports the view as a picture (on the next frame).
@@ -1672,6 +1744,10 @@ impl CanvasApp {
                 self.changed();
             }
             self.wants_redraw = true;
+        }
+
+        if self.screen == Screen::Canvas && self.tools.previews_color != Some(self.tools.color) {
+            self.make_brush_previews(target, renderer);
         }
 
         if std::mem::take(&mut self.want_gallery) && self.screen == Screen::Canvas {

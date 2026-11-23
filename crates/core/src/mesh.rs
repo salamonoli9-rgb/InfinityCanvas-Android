@@ -52,6 +52,12 @@ pub fn tessellate_part(stroke: &Stroke, range: std::ops::Range<usize>, lod: u32)
     }
     let mut lod = lod.min(MAX_LOD);
     let caps = [stroke.flat_caps[0] && range.start == 0, stroke.flat_caps[1] && range.end == stroke.points.len()];
+    if stroke.brush == Brush::Spray {
+        // From the raw points: the dots must not move when the LOD changes.
+        let mut out: VertexBuffers<[f32; 3], u32> = VertexBuffers::new();
+        spray(&mut out, stroke, &dedup(&stroke.points[range]));
+        return Mesh { vertices: out.vertices, indices: out.indices };
+    }
     // Raw input is very dense (a sample every ~0.4 px); drop points that don't change the
     // shape by more than a fraction of a pixel at this LOD. Saves most of the geometry.
     let pts = simplify(&dedup(&stroke.points[range]), SIMPLIFY_TOLERANCE / (1u32 << lod) as f32);
@@ -84,6 +90,14 @@ pub fn tessellate_part(stroke: &Stroke, range: std::ops::Range<usize>, lod: u32)
                 fill_polygon(&mut out, stroke, &smooth, tolerance);
                 ribbon(&mut out, stroke, &smooth, tolerance, caps, true);
             }
+            Brush::Brush => {
+                // Enough points along the path for the tapered ends.
+                let total: f32 = smooth.windows(2).map(|w| ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt()).sum();
+                let dense = densify(&smooth, (total / 48.0).max(stroke.width * 0.5).max(0.05));
+                ribbon(&mut out, stroke, &dense, tolerance, caps, false)
+            }
+            Brush::Airbrush => soft_ribbon(&mut out, stroke, &smooth, tolerance, &AIRBRUSH_PROFILE),
+            Brush::Watercolor => soft_ribbon(&mut out, stroke, &smooth, tolerance, &WATERCOLOR_PROFILE),
             _ => ribbon(&mut out, stroke, &smooth, tolerance, caps, false),
         }
     }
@@ -122,6 +136,141 @@ fn smooth_keeping_corners(pts: &[StrokePoint], tolerance: f32) -> Vec<StrokePoin
     out
 }
 
+/// Inserts points so that no segment is longer than `max_len`.
+fn densify(pts: &[StrokePoint], max_len: f32) -> Vec<StrokePoint> {
+    let mut out = Vec::with_capacity(pts.len());
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let n = (len / max_len).ceil().clamp(1.0, 256.0) as usize;
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            out.push(StrokePoint { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, pressure: a.pressure + (b.pressure - a.pressure) * t });
+        }
+    }
+    if let Some(l) = pts.last() {
+        out.push(*l);
+    }
+    out
+}
+
+/// Width factor of a tapered stroke at arc length `s` of `total`: thin at both ends.
+fn taper(s: f32, total: f32, width: f32) -> f32 {
+    let t = (total * 0.2).min(width * 5.0).max(1e-3);
+    let e = (s.min(total - s) / t).clamp(0.0, 1.0);
+    0.12 + 0.88 * e.sqrt()
+}
+
+/// Intensity across a soft stroke, from the edge (0) through the middle and back: offsets as a
+/// fraction of the half width with the intensity there.
+const AIRBRUSH_PROFILE: [(f32, f32); 5] = [(-1.0, 0.0), (-0.55, 0.45), (0.0, 1.0), (0.55, 0.45), (1.0, 0.0)];
+/// Watercolour: a darker rim (pigment settles at the edge of a wash), lighter inside.
+const WATERCOLOR_PROFILE: [(f32, f32); 7] = [(-1.0, 0.0), (-0.85, 0.95), (-0.6, 0.6), (0.0, 0.5), (0.6, 0.6), (0.85, 0.95), (1.0, 0.0)];
+
+/// A stroke with soft edges: our own triangle strip across the path with an intensity profile
+/// (lyon's strokes only have vertices on the edges), and soft round ends.
+fn soft_ribbon(out: &mut VertexBuffers<[f32; 3], u32>, stroke: &Stroke, pts: &[StrokePoint], tolerance: f32, profile: &[(f32, f32)]) {
+    let n = pts.len();
+    let k = profile.len() as u32;
+    let normal = |i: usize| {
+        let (a, b) = (pts[i.saturating_sub(1)], pts[(i + 1).min(n - 1)]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let l = dx.hypot(dy).max(1e-6);
+        (-dy / l, dx / l)
+    };
+    let base = out.vertices.len() as u32;
+    for (i, p) in pts.iter().enumerate() {
+        let r = stroke.radius_at(p);
+        let (nx, ny) = normal(i);
+        for &(o, a) in profile {
+            out.vertices.push([p.x + nx * r * o, p.y + ny * r * o, a]);
+        }
+    }
+    for i in 0..n as u32 - 1 {
+        for j in 0..k - 1 {
+            let (a, b) = (base + i * k + j, base + (i + 1) * k + j);
+            out.indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+        }
+    }
+    // Round ends: a fan from the middle (full intensity) to the rim (zero).
+    let middle = profile.iter().min_by(|a, b| a.0.abs().total_cmp(&b.0.abs())).map_or(1.0, |(_, a)| *a);
+    for (i, sign) in [(0usize, -1.0f32), (n - 1, 1.0)] {
+        let p = pts[i];
+        let r = stroke.radius_at(&p);
+        let (nx, ny) = normal(i);
+        let (tx, ty) = (ny * -sign, -nx * -sign); // along the path, pointing out of the stroke
+        let steps = ((std::f32::consts::PI * r / tolerance.max(0.05)).sqrt().ceil() as u32).clamp(4, 24);
+        let c = out.vertices.len() as u32;
+        out.vertices.push([p.x, p.y, middle]);
+        for s in 0..=steps {
+            let t = std::f32::consts::PI * s as f32 / steps as f32;
+            let (cs, sn) = (t.cos(), t.sin());
+            // From one side (+normal) over the tip to the other side (−normal).
+            let dx = nx * cs + tx * sn;
+            let dy = ny * cs + ty * sn;
+            out.vertices.push([p.x + dx * r, p.y + dy * r, 0.0]);
+        }
+        for s in 0..steps {
+            out.indices.extend_from_slice(&[c, c + 1 + s, c + 2 + s]);
+        }
+    }
+}
+
+/// Spray: dots scattered over the brush disc along the path, from a random generator seeded by
+/// the stroke and the position along it (the same dots every time it is tessellated).
+fn spray(out: &mut VertexBuffers<[f32; 3], u32>, stroke: &Stroke, pts: &[StrokePoint]) {
+    let rng = |seed: u64| {
+        // SplitMix64.
+        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 11) as f32 / (1u64 << 53) as f32
+    };
+    let step = (stroke.width * 0.06).max(0.05);
+    let mut dot = |c: [f32; 2], r: f32| {
+        let b = out.vertices.len() as u32;
+        out.vertices.push([c[0], c[1], 1.0]);
+        for i in 0..6 {
+            let a = i as f32 * std::f32::consts::TAU / 6.0;
+            out.vertices.push([c[0] + r * a.cos(), c[1] + r * a.sin(), 1.0]);
+        }
+        for i in 0..6 {
+            out.indices.extend_from_slice(&[b, b + 1 + i, b + 1 + (i + 1) % 6]);
+        }
+    };
+    let seed = stroke.id.wrapping_mul(0x2545_F491_4F6C_DD1D);
+    let mut emit = |p: StrokePoint, k: u64| {
+        let r = stroke.radius_at(&p);
+        for j in 0..3u64 {
+            let s = seed ^ (k * 8 + j).wrapping_mul(0x9E37_79B9);
+            // Uniform over the disc, denser towards the middle (square root left out on purpose).
+            let (a, d) = (rng(s) * std::f32::consts::TAU, rng(s ^ 0xABCD) * r);
+            let size = stroke.width * (0.012 + 0.025 * rng(s ^ 0x1234));
+            dot([p.x + d * a.cos(), p.y + d * a.sin()], size);
+        }
+    };
+    if pts.len() == 1 {
+        for k in 0..12 {
+            emit(pts[0], k);
+        }
+        return;
+    }
+    let mut next = 0.0f32;
+    let mut walked = 0.0f32;
+    let mut k = 0u64;
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        while next <= walked + len && k < 200_000 {
+            let t = if len > 0.0 { (next - walked) / len } else { 0.0 };
+            emit(StrokePoint { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, pressure: a.pressure + (b.pressure - a.pressure) * t }, k);
+            next += step;
+            k += 1;
+        }
+        walked += len;
+    }
+}
+
 /// Nib angles (local coordinates, y down): calligraphy pen and chisel marker.
 const FOUNTAIN_NIB: f32 = -std::f32::consts::FRAC_PI_4;
 const MARKER_NIB: f32 = -1.0;
@@ -147,17 +296,27 @@ fn ribbon(
         let (a, b) = (pts[i.saturating_sub(3)], pts[(i + 3).min(n - 1)]);
         (b.y - a.y).atan2(b.x - a.x)
     };
+    let mut arc = Vec::with_capacity(n);
+    let mut total = 0.0f32;
+    for (i, p) in pts.iter().enumerate() {
+        if i > 0 {
+            total += ((p.x - pts[i - 1].x).powi(2) + (p.y - pts[i - 1].y).powi(2)).sqrt();
+        }
+        arc.push(total);
+    }
     let attrs = |i: usize| -> [f32; 2] {
         let p = pts[i];
         let w = if outline { 1.0 } else { stroke.width_factor(p.pressure) };
         let w = match stroke.brush {
             Brush::Fountain => w * nib(dir(i), FOUNTAIN_NIB, 0.2),
             Brush::Marker => w * nib(dir(i), MARKER_NIB, 0.3),
+            // A paint brush thins out at both ends.
+            Brush::Brush if !outline => w * taper(arc[i], total, stroke.width),
             _ => w,
         };
         [w, stroke.intensity(p.pressure)]
     };
-    let cap = |f: bool| if f || stroke.brush == Brush::Marker { LineCap::Butt } else { LineCap::Round };
+    let cap = |f: bool| if f || matches!(stroke.brush, Brush::Marker | Brush::Highlighter) { LineCap::Butt } else { LineCap::Round };
     let opts = StrokeOptions::tolerance(tolerance)
         .with_line_width(stroke.width.max(0.05))
         .with_variable_line_width(0)
@@ -445,7 +604,7 @@ mod tests {
             let bb = s.cache.bbox;
             for v in &m.vertices {
                 assert!(v[0] >= bb[0] - 0.5 && v[0] <= bb[2] + 0.5 && v[1] >= bb[1] - 0.5 && v[1] <= bb[3] + 0.5, "{brush:?}");
-                assert!(v[2] > 0.0 && v[2] <= 1.0, "{brush:?} intensity");
+                assert!(v[2] >= 0.0 && v[2] <= 1.0, "{brush:?} intensity");
             }
         }
     }
@@ -537,5 +696,35 @@ mod tests {
         let m = tessellate(&s, 0);
         assert!(covers(&m, [10.0, 10.0]) && covers(&m, [90.0, 50.0]));
         assert!(!covers(&m, [50.0, 50.0]), "the hole stays empty");
+    }
+
+    #[test]
+    fn new_brushes() {
+        // Airbrush: soft (zero intensity at the edges, full in the middle).
+        let m = tessellate(&line(Brush::Airbrush, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
+        let edge = m.vertices.iter().filter(|v| v[1].abs() > 4.9).map(|v| v[2]).fold(0.0, f32::max);
+        let mid = m.vertices.iter().filter(|v| v[1].abs() < 0.1).map(|v| v[2]).fold(0.0, f32::max);
+        assert!(edge < 0.01 && mid > 0.99, "{edge} {mid}");
+        // Watercolour: darker rim than middle.
+        let m = tessellate(&line(Brush::Watercolor, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
+        let rim = m.vertices.iter().filter(|v| (v[1].abs() - 4.25).abs() < 0.1).map(|v| v[2]).fold(0.0, f32::max);
+        let inner = m.vertices.iter().filter(|v| v[1].abs() < 0.1 && v[0] > 1.0).map(|v| v[2]).fold(0.0, f32::max);
+        assert!(rim > inner, "{rim} {inner}");
+        // Brush: thin at the ends, full in the middle.
+        let m = tessellate(&line(Brush::Brush, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
+        let half_width_at = |x: f32| m.vertices.iter().filter(|v| (v[0] - x).abs() < 3.0).map(|v| v[1].abs()).fold(0.0, f32::max);
+        assert!(half_width_at(3.0) < 0.6 * half_width_at(50.0), "{} {}", half_width_at(3.0), half_width_at(50.0));
+        // Spray: dots within the brush disc, the same ones at every LOD.
+        let s = line(Brush::Spray, [0.0, 0.0], [100.0, 0.0], 1.0);
+        let (a, b) = (tessellate(&s, 0), tessellate(&s, 5));
+        assert_eq!(a.vertices, b.vertices, "LOD-independent");
+        assert!(a.vertices.iter().all(|v| v[1].abs() <= 5.5));
+        assert!(a.indices.len() / 3 > 100);
+        // Highlighter: flat ends.
+        let m = tessellate(&line(Brush::Highlighter, [0.0, 0.0], [100.0, 0.0], 1.0), 0);
+        assert!(!covers(&m, [102.0, 0.0]) && covers(&m, [98.0, 0.0]));
+        for b in [Brush::Ballpoint, Brush::Crayon, Brush::Charcoal] {
+            assert!(!tessellate(&line(b, [0.0, 0.0], [100.0, 0.0], 0.5), 0).is_empty());
+        }
     }
 }

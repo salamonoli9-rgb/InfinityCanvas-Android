@@ -26,6 +26,9 @@ pub struct ToolState {
     pub width: f32,
     /// Remembered width of every other brush.
     widths: HashMap<Brush, f32>,
+    /// Sample of how each brush draws (shown in the brush menu), and the colour they were made in.
+    pub previews: HashMap<Brush, egui::TextureHandle>,
+    pub previews_color: Option<Color32>,
     /// Eraser diameter in logical points.
     pub eraser: f32,
     pub palette: Vec<Color32>,
@@ -56,6 +59,14 @@ pub fn short_name(b: Brush) -> &'static str {
         Brush::Marker => "Marker",
         Brush::Dotted => "Kropki",
         Brush::Fill => "Wypełnij",
+        Brush::Ballpoint => "Długopis",
+        Brush::Brush => "Pędzel",
+        Brush::Highlighter => "Zakreślacz",
+        Brush::Crayon => "Kredka",
+        Brush::Charcoal => "Węgiel",
+        Brush::Airbrush => "Aerograf",
+        Brush::Watercolor => "Akwarela",
+        Brush::Spray => "Spray",
     }
 }
 
@@ -66,6 +77,8 @@ impl Default for ToolState {
             brush: Brush::Pen,
             shape: None,
             widths: HashMap::new(),
+            previews: HashMap::new(),
+            previews_color: None,
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
             eraser: 24.0,
@@ -141,13 +154,22 @@ fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
     let label = s.shape.map_or(short_name(s.brush), Shape::name);
     let button = egui::Button::new(label).selected(s.tool == Tool::Pen);
     let r = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-        ui.set_min_width(170.0);
-        for b in Brush::ALL {
-            if ui.add(egui::Button::new(b.name()).selected(s.tool == Tool::Pen && s.brush == b)).clicked() {
-                s.set_brush(b);
-                ui.close();
+        ui.set_min_width(250.0);
+        let max_h = (ui.ctx().content_rect().height() * 0.62).max(240.0);
+        egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).max_height(max_h).show(ui, |ui| {
+            for b in Brush::ALL {
+                let selected = s.tool == Tool::Pen && s.brush == b;
+                let button = match s.previews.get(&b) {
+                    // The sample of how the brush draws, then its name.
+                    Some(tex) => egui::Button::image_and_text(egui::Image::new((tex.id(), egui::vec2(96.0, 24.0))), b.name()),
+                    None => egui::Button::new(b.name()),
+                };
+                if ui.add(button.selected(selected)).clicked() {
+                    s.set_brush(b);
+                    ui.close();
+                }
             }
-        }
+        });
         ui.separator();
         ui.label(egui::RichText::new("Kształt (aktualnym pędzlem)").small().weak());
         ui.horizontal_wrapped(|ui| {

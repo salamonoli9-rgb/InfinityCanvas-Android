@@ -1068,3 +1068,25 @@ fn lasso_select_move_scale_and_actions() {
     app.select_action(infinite_canvas::ui::SelectionAction::Delete);
     assert_eq!(app.doc.len(), n);
 }
+
+#[test]
+fn every_brush_sample_has_ink() {
+    use canvas_core::stroke::Brush;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let [w, h] = infinite_canvas::app::SAMPLE_SIZE;
+    let mut sheet = image::RgbaImage::new(w, h * Brush::ALL.len() as u32);
+    for (i, b) in Brush::ALL.iter().enumerate() {
+        let target = Target::View { device: &gpu.device, queue: &gpu.queue, format: FORMAT, size: [W, H], view: &gpu.view };
+        let px = infinite_canvas::app::brush_sample(target, &mut gpu.renderer, *b, [20, 20, 40, 255]);
+        let ink = px.as_chunks::<4>().0.iter().filter(|p| p[0] < 200).count();
+        assert!(ink > 100, "{b:?}: {ink} ink pixels");
+        let img = image::RgbaImage::from_raw(w, h, px).unwrap();
+        image::imageops::overlay(&mut sheet, &img, 0, (i as u32 * h) as i64);
+    }
+    if let Ok(path) = std::env::var("BRUSH_SHEET") {
+        sheet.save(path).unwrap();
+    }
+}

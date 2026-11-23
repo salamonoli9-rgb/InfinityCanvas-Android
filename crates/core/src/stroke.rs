@@ -27,17 +27,43 @@ pub enum Brush {
     Dotted,
     /// Fills the area enclosed by the path.
     Fill,
+    // (New brushes go at the end: files store the variant index.)
+    /// Thin, even ballpoint; a little pressure response.
+    Ballpoint,
+    /// Paint brush: strong pressure response, tapered ends.
+    Brush,
+    /// Wide translucent highlighter with flat ends.
+    Highlighter,
+    /// Waxy crayon: coarse grain.
+    Crayon,
+    /// Charcoal: very grainy and soft.
+    Charcoal,
+    /// Airbrush: soft edges fading out.
+    Airbrush,
+    /// Watercolour: translucent, soft, darker rim.
+    Watercolor,
+    /// Spray: scattered dots.
+    Spray,
 }
 
 impl Brush {
-    pub const ALL: [Brush; 9] = [
+    /// In menu order.
+    pub const ALL: [Brush; 17] = [
         Brush::Pen,
+        Brush::Ballpoint,
         Brush::Fountain,
         Brush::Dynamic,
         Brush::Fixed,
+        Brush::Brush,
         Brush::SoftPencil,
         Brush::HardPencil,
+        Brush::Crayon,
+        Brush::Charcoal,
         Brush::Marker,
+        Brush::Highlighter,
+        Brush::Airbrush,
+        Brush::Watercolor,
+        Brush::Spray,
         Brush::Dotted,
         Brush::Fill,
     ];
@@ -53,6 +79,14 @@ impl Brush {
             Brush::Marker => "Marker",
             Brush::Dotted => "Kropkowana",
             Brush::Fill => "Wypełnienie",
+            Brush::Ballpoint => "Długopis",
+            Brush::Brush => "Pędzel",
+            Brush::Highlighter => "Zakreślacz",
+            Brush::Crayon => "Kredka",
+            Brush::Charcoal => "Węgiel",
+            Brush::Airbrush => "Aerograf",
+            Brush::Watercolor => "Akwarela",
+            Brush::Spray => "Spray",
         }
     }
 
@@ -67,6 +101,14 @@ impl Brush {
             Brush::Marker => 16.0,
             Brush::Dotted => 4.0,
             Brush::Fill => 2.0,
+            Brush::Ballpoint => 1.6,
+            Brush::Brush => 9.0,
+            Brush::Highlighter => 20.0,
+            Brush::Crayon => 6.0,
+            Brush::Charcoal => 11.0,
+            Brush::Airbrush => 34.0,
+            Brush::Watercolor => 26.0,
+            Brush::Spray => 30.0,
         }
     }
 
@@ -76,6 +118,11 @@ impl Brush {
             Brush::SoftPencil => 0.92,
             Brush::HardPencil => 0.8,
             Brush::Marker => 0.55,
+            Brush::Highlighter => 0.35,
+            Brush::Crayon => 0.95,
+            Brush::Charcoal => 0.9,
+            Brush::Airbrush => 0.55,
+            Brush::Watercolor => 0.5,
             _ => 1.0,
         }
     }
@@ -85,6 +132,9 @@ impl Brush {
         match self {
             Brush::SoftPencil => Some((0.75, 1.3)),
             Brush::HardPencil => Some((0.55, 0.8)),
+            Brush::Crayon => Some((0.85, 2.2)),
+            Brush::Charcoal => Some((0.9, 3.5)),
+            Brush::Watercolor => Some((0.3, 7.0)),
             _ => None,
         }
     }
@@ -170,7 +220,11 @@ impl Stroke {
             Brush::Pen | Brush::Fountain | Brush::Dotted => pressure_factor(pressure),
             Brush::Dynamic => pressure.clamp(0.15, 1.0),
             Brush::SoftPencil | Brush::HardPencil => 0.55 + 0.45 * pressure.clamp(0.0, 1.0),
-            Brush::Fixed | Brush::Marker | Brush::Fill => 1.0,
+            Brush::Ballpoint => 0.75 + 0.25 * pressure.clamp(0.0, 1.0),
+            Brush::Brush => 0.08 + 0.92 * pressure.clamp(0.0, 1.0).powf(1.3),
+            Brush::Crayon => 0.8 + 0.2 * pressure.clamp(0.0, 1.0),
+            Brush::Charcoal | Brush::Airbrush | Brush::Watercolor | Brush::Spray => 0.5 + 0.5 * pressure.clamp(0.0, 1.0),
+            Brush::Fixed | Brush::Marker | Brush::Fill | Brush::Highlighter => 1.0,
         }
     }
 
@@ -180,6 +234,8 @@ impl Stroke {
         match self.brush {
             Brush::SoftPencil => 0.3 + 0.7 * p,
             Brush::HardPencil => 0.25 + 0.6 * p,
+            Brush::Crayon => 0.6 + 0.4 * p,
+            Brush::Charcoal => 0.45 + 0.55 * p,
             _ => 1.0,
         }
     }
