@@ -56,8 +56,15 @@ impl Headless {
 
     /// Renders a frame and returns RGBA pixels.
     fn frame(&mut self, app: &mut CanvasApp) -> Vec<u8> {
-        // Render twice: the first frame may postpone meshes because of the time budget.
-        for _ in 0..3 {
+        // Render until the picture is complete: meshes may still be coming from the worker
+        // threads, and the sharp frame follows once the view has settled.
+        for i in 0..400 {
+            if i >= 3 && !app.animating() {
+                break;
+            }
+            if i >= 3 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(W as f32, H as f32))),
                 ..Default::default()
@@ -346,7 +353,7 @@ fn rotated_view_renders_on_gpu_and_cpu_paths() {
     // exact CPU path, which must apply the same rotation. The edge stays put.
     app.wheel_zoom([389.0, 150.0], 8.0);
     let px = gpu.frame(&mut app);
-    assert!(dark(&px, 384, 150) && dark(&px, 386, 40), "inside the line");
+    assert!(dark(&px, 384, 150) && dark(&px, 386, 260), "inside the line (below the toolbar)");
     assert!(!dark(&px, 393, 150) && !dark(&px, 393, 260), "outside the edge");
     // Straighten again.
     app.reset_rotation();
