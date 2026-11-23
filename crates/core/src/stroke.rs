@@ -121,6 +121,8 @@ pub struct Stroke {
     /// Flat (butt) end at the start / end instead of a round cap: set where the eraser cut.
     pub flat_caps: [bool; 2],
     pub brush: Brush,
+    /// Id of the layer the stroke is on (see `Document::layers`).
+    pub layer: u32,
     #[serde(skip)]
     pub cache: StrokeCache,
 }
@@ -140,7 +142,7 @@ pub fn pressure_factor(p: f32) -> f32 {
 
 impl Stroke {
     pub fn new(id: StrokeId, level: i32, anchor: [BigInt; 2], color: [u8; 4], width: f32) -> Self {
-        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, flat_caps: [false; 2], brush: Brush::Pen, cache: StrokeCache::default() };
+        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, flat_caps: [false; 2], brush: Brush::Pen, layer: 0, cache: StrokeCache::default() };
         s.refresh_cache();
         s
     }

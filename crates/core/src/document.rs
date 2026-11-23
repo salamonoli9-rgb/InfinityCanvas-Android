@@ -2,6 +2,7 @@
 
 use crate::camera::{Camera, LevelFrame};
 use crate::image::{ImageId, RefImage};
+use serde::{Deserialize, Serialize};
 use crate::stroke::{Stroke, StrokeId};
 use num_bigint::BigInt;
 use num_traits::One;
@@ -98,10 +99,29 @@ impl LevelIndex {
     }
 }
 
+/// A layer of strokes. Layers are drawn bottom to top, each composited with its opacity;
+/// an eraser only erases its own layer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Layer {
+    pub id: u32,
+    pub name: String,
+    pub visible: bool,
+    /// 0..1
+    pub opacity: f32,
+}
+
+impl Layer {
+    pub fn new(id: u32, name: impl Into<String>) -> Self {
+        Self { id, name: name.into(), visible: true, opacity: 1.0 }
+    }
+}
+
 /// A stroke that should be drawn this frame.
 #[derive(Clone, Debug)]
 pub struct VisibleStroke {
     pub id: StrokeId,
+    /// Position of the stroke's layer in `Document::layers` (bottom = 0).
+    pub layer: u16,
     /// Draw order key (see [`Stroke::order`]).
     pub order: u64,
     pub level: i32,
@@ -118,13 +138,31 @@ pub struct Document {
     images: BTreeMap<ImageId, RefImage>,
     /// Saved views.
     pub bookmarks: Vec<crate::flight::Bookmark>,
+    /// Layers, bottom first. Never empty.
+    pub layers: Vec<Layer>,
     levels: BTreeMap<i32, LevelIndex>,
     next_id: StrokeId,
 }
 
 impl Document {
     pub fn new() -> Self {
-        Self { next_id: 1, ..Default::default() }
+        Self { next_id: 1, layers: vec![Layer::new(0, "Warstwa 1")], ..Default::default() }
+    }
+
+    /// Position of layer `id` in `layers` (strokes of a missing layer go to the bottom one).
+    pub fn layer_pos(&self, id: u32) -> usize {
+        self.layers.iter().position(|l| l.id == id).unwrap_or(0)
+    }
+
+    fn layer_visible(&self, id: u32) -> bool {
+        self.layers.get(self.layer_pos(id)).is_none_or(|l| l.visible)
+    }
+
+    /// A new layer on top; returns its id.
+    pub fn add_layer(&mut self, name: impl Into<String>) -> u32 {
+        let id = self.layers.iter().map(|l| l.id + 1).max().unwrap_or(0);
+        self.layers.push(Layer::new(id, name));
+        id
     }
 
     pub fn from_strokes(strokes: Vec<Stroke>, next_id: StrokeId) -> Self {
@@ -272,12 +310,15 @@ impl Document {
                     continue;
                 }
                 let s = &self.strokes[&id];
+                if !self.layer_visible(s.layer) {
+                    continue;
+                }
                 if let Some(v) = self.visible(s, &f, rect) {
                     out.push(v);
                 }
             }
         }
-        out.sort_unstable_by_key(|v| (v.order, v.id));
+        out.sort_unstable_by_key(|v| (v.layer, v.order, v.id));
         out
     }
 
@@ -299,7 +340,7 @@ impl Document {
         if (x1 - x0).max(y1 - y0) < MIN_PIXELS {
             return None;
         }
-        Some(VisibleStroke { id: s.id, order: s.order, level: s.level, offset: o, scale: f.scale })
+        Some(VisibleStroke { id: s.id, layer: self.layer_pos(s.layer) as u16, order: s.order, level: s.level, offset: o, scale: f.scale })
     }
 
     /// Ids of strokes touched by a circle of `radius` px around screen point `p`.
@@ -454,5 +495,24 @@ mod tests {
         assert!(doc.hit_test(&cam, VP, [1500.0, 900.0], 3.0).is_empty());
         assert_eq!(doc.query(&cam, VP, [p[0] - 5.0, p[1] - 5.0, p[0] + 5.0, p[1] + 5.0]).len(), 1);
         assert!(doc.query(&cam, VP, [1400.0, 850.0, 1600.0, 950.0]).is_empty());
+    }
+
+    #[test]
+    fn layers_order_and_visibility() {
+        let mut doc = Document::new();
+        let cam = Camera::default();
+        let top = doc.add_layer("Góra");
+        let a = draw(&mut doc, &cam, [400.0, 300.0]); // bottom layer, drawn first
+        let b = draw(&mut doc, &cam, [400.0, 300.0]);
+        let mut sb = doc.remove(b).unwrap();
+        sb.layer = top;
+        doc.insert(sb);
+        let c = draw(&mut doc, &cam, [400.0, 300.0]); // bottom layer, drawn last
+        // Layer first, then drawing order: c (bottom layer) is below b (top layer).
+        let order: Vec<StrokeId> = doc.query(&cam, VP, FULL).iter().map(|v| v.id).collect();
+        assert_eq!(order, vec![a, c, b]);
+        doc.layers[1].visible = false;
+        let order: Vec<StrokeId> = doc.query(&cam, VP, FULL).iter().map(|v| v.id).collect();
+        assert_eq!(order, vec![a, c]);
     }
 }

@@ -7,16 +7,52 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 4] = b"ICNV";
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 
-/// Version 7: bookmarks (saved views).
+/// Version 8: layers (strokes carry a layer id).
 #[derive(Serialize, Deserialize)]
-struct FileV7 {
+struct FileV8 {
     camera: Camera,
     next_id: StrokeId,
     strokes: Vec<Stroke>,
     images: Vec<crate::image::RefImage>,
     bookmarks: Vec<crate::flight::Bookmark>,
+    layers: Vec<crate::document::Layer>,
+}
+
+/// Version 7: bookmarks (saved views).
+#[derive(Deserialize)]
+struct FileV7 {
+    camera: Camera,
+    next_id: StrokeId,
+    strokes: Vec<StrokeV5>,
+    images: Vec<crate::image::RefImage>,
+    bookmarks: Vec<crate::flight::Bookmark>,
+}
+
+/// Stroke of versions 5–7 (no layer).
+#[derive(Deserialize)]
+struct StrokeV5 {
+    id: StrokeId,
+    level: i32,
+    anchor: [num_bigint::BigInt; 2],
+    points: Vec<crate::stroke::StrokePoint>,
+    color: [u8; 4],
+    width: f32,
+    order: u64,
+    flat_caps: [bool; 2],
+    brush: crate::stroke::Brush,
+}
+
+impl From<StrokeV5> for Stroke {
+    fn from(s: StrokeV5) -> Self {
+        let mut out = Stroke::new(s.id, s.level, s.anchor, s.color, s.width);
+        out.points = s.points;
+        out.order = s.order;
+        out.flat_caps = s.flat_caps;
+        out.brush = s.brush;
+        out
+    }
 }
 
 /// Version 6: reference images.
@@ -24,7 +60,7 @@ struct FileV7 {
 struct FileV6 {
     camera: Camera,
     next_id: StrokeId,
-    strokes: Vec<Stroke>,
+    strokes: Vec<StrokeV5>,
     images: Vec<crate::image::RefImage>,
 }
 
@@ -33,7 +69,7 @@ struct FileV6 {
 struct FileV5 {
     camera: Camera,
     next_id: StrokeId,
-    strokes: Vec<Stroke>,
+    strokes: Vec<StrokeV5>,
 }
 
 /// Version 4: the camera has a rotation; strokes as in version 3.
@@ -164,12 +200,13 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 pub fn encode(doc: &Document, camera: &Camera) -> Vec<u8> {
-    let file = FileV7 {
+    let file = FileV8 {
         camera: camera.clone(),
         next_id: doc.next_id(),
         strokes: doc.strokes().cloned().collect(),
         images: doc.images().cloned().collect(),
         bookmarks: doc.bookmarks.clone(),
+        layers: doc.layers.clone(),
     };
     let mut out = Vec::with_capacity(64 + doc.len() * 128);
     out.extend_from_slice(MAGIC);
@@ -202,11 +239,11 @@ pub fn decode(bytes: &[u8]) -> Result<(Document, Camera), LoadError> {
         }
         5 => {
             let f: FileV5 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
-            Ok((Document::from_strokes(f.strokes, f.next_id), f.camera))
+            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera))
         }
         6 => {
             let f: FileV6 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
-            let mut doc = Document::from_strokes(f.strokes, f.next_id);
+            let mut doc = Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id);
             for img in f.images {
                 doc.insert_image(img);
             }
@@ -214,11 +251,23 @@ pub fn decode(bytes: &[u8]) -> Result<(Document, Camera), LoadError> {
         }
         7 => {
             let f: FileV7 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
+            let mut doc = Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id);
+            for img in f.images {
+                doc.insert_image(img);
+            }
+            doc.bookmarks = f.bookmarks;
+            Ok((doc, f.camera))
+        }
+        8 => {
+            let f: FileV8 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
             let mut doc = Document::from_strokes(f.strokes, f.next_id);
             for img in f.images {
                 doc.insert_image(img);
             }
             doc.bookmarks = f.bookmarks;
+            if !f.layers.is_empty() {
+                doc.layers = f.layers;
+            }
             Ok((doc, f.camera))
         }
         v => Err(LoadError::UnsupportedVersion(v)),
@@ -266,18 +315,26 @@ mod tests {
         let img = crate::image::RefImage::place(doc.alloc_id(), &cam, [100.0, 100.0], [3, 2], std::sync::Arc::new(vec![1, 2, 3]), 0.8);
         doc.insert_image(img.clone());
         doc.bookmarks.push(crate::flight::Bookmark { name: "Głęboko".into(), camera: cam.clone() });
+        let l = doc.add_layer("Tusz");
+        doc.layers[0].opacity = 0.5;
+        let mut s2 = Stroke::new(doc.alloc_id(), 0, [BigInt::from(1), BigInt::from(1)], [0, 0, 0, 255], 1.0);
+        s2.layer = l;
+        s2.push(StrokePoint { x: 0.0, y: 0.0, pressure: 1.0 });
+        doc.insert(s2.clone());
         let bytes = encode(&doc, &cam);
         let (d2, c2) = decode(&bytes).unwrap();
         assert_eq!(c2, cam);
         assert_eq!(d2.get(s.id), Some(&s));
         assert_eq!(d2.image(img.id), Some(&img));
         assert_eq!(d2.bookmarks, doc.bookmarks);
+        assert_eq!(d2.layers, doc.layers);
+        assert_eq!(d2.get(s2.id).unwrap().layer, l);
         assert_eq!(d2.next_id(), doc.next_id());
 
         let dir = std::env::temp_dir().join(format!("icnv-test-{}", std::process::id()));
         let path = dir.join("a.icnv");
         save_file(&path, &doc, &cam).unwrap();
-        assert_eq!(load_file(&path).unwrap().0.len(), 1);
+        assert_eq!(load_file(&path).unwrap().0.len(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -285,7 +342,7 @@ mod tests {
     fn rejects_garbage() {
         assert!(matches!(decode(b"nope"), Err(LoadError::BadMagic)));
         assert!(matches!(decode(b"ICNV\x09\x00"), Err(LoadError::UnsupportedVersion(9))));
-        assert!(matches!(decode(b"ICNV\x07\x00\xff"), Err(LoadError::Corrupt(_))));
+        assert!(matches!(decode(b"ICNV\x08\x00\xff"), Err(LoadError::Corrupt(_))));
     }
 
     #[test]
@@ -405,5 +462,54 @@ mod tests {
         let (d, cam) = decode(&bytes).unwrap();
         assert_eq!(d.get(4), Some(&st));
         assert_eq!((cam.log_zoom, cam.rotation), (-7.0, 0.0));
+    }
+
+    #[test]
+    fn reads_version_7() {
+        #[derive(Serialize)]
+        struct S5 {
+            id: StrokeId,
+            level: i32,
+            anchor: [BigInt; 2],
+            points: Vec<StrokePoint>,
+            color: [u8; 4],
+            width: f32,
+            order: u64,
+            flat_caps: [bool; 2],
+            brush: crate::stroke::Brush,
+        }
+        #[derive(Serialize)]
+        struct F7 {
+            camera: Camera,
+            next_id: StrokeId,
+            strokes: Vec<S5>,
+            images: Vec<crate::image::RefImage>,
+            bookmarks: Vec<crate::flight::Bookmark>,
+        }
+        let pts = vec![StrokePoint { x: 1.0, y: 2.0, pressure: 1.0 }, StrokePoint { x: 3.0, y: 4.0, pressure: 0.5 }];
+        let f = F7 {
+            camera: Camera::default(),
+            next_id: 3,
+            strokes: vec![S5 {
+                id: 2,
+                level: 0,
+                anchor: [BigInt::from(0), BigInt::from(0)],
+                points: pts.clone(),
+                color: [1, 2, 3, 255],
+                width: 2.0,
+                order: 2,
+                flat_caps: [false, true],
+                brush: crate::stroke::Brush::Marker,
+            }],
+            images: vec![],
+            bookmarks: vec![crate::flight::Bookmark { name: "a".into(), camera: Camera::default() }],
+        };
+        let mut bytes = b"ICNV\x07\x00".to_vec();
+        bytes.extend(postcard::to_allocvec(&f).unwrap());
+        let (d, _) = decode(&bytes).unwrap();
+        let s = d.get(2).unwrap();
+        assert_eq!((s.brush, s.flat_caps, s.layer, &s.points), (crate::stroke::Brush::Marker, [false, true], 0, &pts));
+        assert_eq!(d.bookmarks.len(), 1);
+        assert_eq!(d.layers.len(), 1, "a default layer");
     }
 }

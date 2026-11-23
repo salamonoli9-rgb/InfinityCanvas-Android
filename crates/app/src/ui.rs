@@ -103,6 +103,8 @@ pub struct Actions {
     pub export: bool,
     /// Open the bookmarks window.
     pub bookmarks: bool,
+    /// Open the layers window.
+    pub layers: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -200,6 +202,10 @@ fn photos_button(ui: &mut egui::Ui, a: &mut Actions) {
         ui.set_min_width(190.0);
         if ui.button("Zdjęcia…").clicked() {
             a.photos = true;
+            ui.close();
+        }
+        if ui.button("Warstwy…").clicked() {
+            a.layers = true;
             ui.close();
         }
         if ui.button("Zakładki…").clicked() {
@@ -668,6 +674,125 @@ pub fn bookmarks_window(ctx: &egui::Context, st: &mut BookmarkPanel, names: &[St
     if !open {
         st.open = false;
         st.renaming = None;
+    }
+    out
+}
+
+pub struct LayerInfo {
+    pub id: u32,
+    pub name: String,
+    pub visible: bool,
+    pub opacity: f32,
+    pub active: bool,
+}
+
+#[derive(Default)]
+pub struct LayerPanel {
+    pub open: bool,
+    pub renaming: Option<(u32, String)>,
+    /// Layer waiting for a delete confirmation.
+    pub confirm_delete: Option<u32>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LayerAction {
+    Add,
+    Select(u32),
+    ToggleVisible(u32),
+    Opacity(u32, f32),
+    Up(u32),
+    Down(u32),
+    Rename(u32, String),
+    Delete(u32),
+}
+
+/// The layers window, top layer first. Tapping a layer's name makes it the one you draw on.
+pub fn layers_window(ctx: &egui::Context, st: &mut LayerPanel, layers: &[LayerInfo], safe_top: f32) -> Vec<LayerAction> {
+    let mut out = Vec::new();
+    if !st.open {
+        return out;
+    }
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 16.0).min(460.0);
+    let max_h = (screen.height() - safe_top - 140.0).max(200.0);
+    let mut open = true;
+    egui::Window::new("Warstwy")
+        .id(egui::Id::unique("layers"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top])
+        .fixed_size([width, 0.0])
+        .show(ctx, |ui| {
+            ui.set_width(width - 16.0);
+            if ui.button("Dodaj warstwę").clicked() {
+                out.push(LayerAction::Add);
+            }
+            ui.label(egui::RichText::new("Rysujesz na zaznaczonej warstwie. Gumka ściera tylko na niej.").small().weak());
+            egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).max_height(max_h).show(ui, |ui| {
+                let n = layers.len();
+                for (pos, l) in layers.iter().enumerate().rev() {
+                    ui.separator();
+                    if let Some((id, text)) = st.renaming.as_mut()
+                        && *id == l.id
+                    {
+                        let mut done = false;
+                        ui.horizontal(|ui| {
+                            let r = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width() - 70.0));
+                            done = ui.button("OK").clicked() || (r.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)));
+                        });
+                        if done {
+                            out.push(LayerAction::Rename(l.id, text.clone()));
+                            st.renaming = None;
+                        }
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        let name = egui::RichText::new(&l.name);
+                        let name = if l.active { name.strong() } else { name };
+                        if ui.add(egui::Button::new(name).selected(l.active)).clicked() {
+                            out.push(LayerAction::Select(l.id));
+                        }
+                        if !l.visible {
+                            ui.label(egui::RichText::new("ukryta").small().weak());
+                        }
+                        let mut o = l.opacity;
+                        if ui.add(egui::Slider::new(&mut o, 0.0..=1.0).show_value(false)).on_hover_text("krycie").changed() {
+                            out.push(LayerAction::Opacity(l.id, o));
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button(if l.visible { "Ukryj" } else { "Pokaż" }).clicked() {
+                            out.push(LayerAction::ToggleVisible(l.id));
+                        }
+                        if ui.add_enabled(pos + 1 < n, egui::Button::new("W górę")).clicked() {
+                            out.push(LayerAction::Up(l.id));
+                        }
+                        if ui.add_enabled(pos > 0, egui::Button::new("W dół")).clicked() {
+                            out.push(LayerAction::Down(l.id));
+                        }
+                        if ui.button("Nazwa").clicked() {
+                            st.renaming = Some((l.id, l.name.clone()));
+                        }
+                        if st.confirm_delete == Some(l.id) {
+                            if ui.button(egui::RichText::new("Usuń z kreskami").color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
+                                out.push(LayerAction::Delete(l.id));
+                                st.confirm_delete = None;
+                            }
+                            if ui.button("Nie").clicked() {
+                                st.confirm_delete = None;
+                            }
+                        } else if ui.add_enabled(n > 1, egui::Button::new("Usuń")).clicked() {
+                            st.confirm_delete = Some(l.id);
+                        }
+                    });
+                }
+            });
+        });
+    if !open {
+        st.open = false;
+        st.renaming = None;
+        st.confirm_delete = None;
     }
     out
 }

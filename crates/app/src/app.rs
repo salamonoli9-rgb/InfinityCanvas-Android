@@ -119,6 +119,9 @@ pub struct CanvasApp {
     /// Export the view as a picture on the next frame.
     pending_export: bool,
     bookmark_panel: ui::BookmarkPanel,
+    layer_panel: ui::LayerPanel,
+    /// Id of the layer new strokes go to.
+    pub active_layer: u32,
     /// Camera flight to a bookmark in progress, with its start time.
     flight: Option<(canvas_core::flight::Flight, Instant)>,
     /// Short message at the bottom of the screen, with the time it appeared.
@@ -250,6 +253,8 @@ impl CanvasApp {
             pending_bucket: None,
             pending_export: false,
             bookmark_panel: ui::BookmarkPanel::default(),
+            layer_panel: ui::LayerPanel::default(),
+            active_layer: 0,
             flight: None,
             toast: None,
             save_thread: None,
@@ -298,6 +303,7 @@ impl CanvasApp {
         self.decoded.clear();
         self.image_edit = None;
         self.flight = None;
+        self.active_layer = self.doc.layers.last().map_or(0, |l| l.id);
         self.save_path = path;
         self.dirty = false;
         self.clear_render_cache = true;
@@ -341,6 +347,7 @@ impl CanvasApp {
         let visible = self.doc.query(&cam, vp, [0.0, 0.0, vp[0], vp[1]]);
         self.decode_images();
         let images = self.image_draws(&cam, vp);
+        let layer_opacity: Vec<f32> = self.doc.layers.iter().map(|l| l.opacity).collect();
         let (device, queue, format) = target.device_queue_format();
         let px = renderer.render_rgba(
             device,
@@ -352,6 +359,7 @@ impl CanvasApp {
                 doc: &self.doc,
                 active: None,
                 images: &images,
+                layer_opacity: &layer_opacity,
                 log_zoom: cam.log_zoom,
                 rotation: cam.rot(),
                 background: BACKGROUND,
@@ -429,8 +437,9 @@ impl CanvasApp {
             self.finish_image_edit();
             return true;
         }
-        if self.bookmark_panel.open {
+        if self.bookmark_panel.open || self.layer_panel.open {
             self.bookmark_panel.open = false;
+            self.layer_panel.open = false;
             return true;
         }
         if self.photo_panel.open {
@@ -579,6 +588,7 @@ impl CanvasApp {
             let width = (1.2 * k / frame.scale) as f32;
             for p in &patches {
                 let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [p.color[0], p.color[1], p.color[2], 255], width);
+                s.layer = self.active_layer;
                 s.brush = Brush::Fill;
                 s.points = p.polygon.iter().map(|q| to_local(k, origin, *q)).collect();
                 s.refresh_cache();
@@ -602,6 +612,7 @@ impl CanvasApp {
             let width = (self.tools.width as f64 * self.pixels_per_point as f64 / frame.scale) as f32;
             for line in &lines {
                 let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [col.r(), col.g(), col.b(), col.a()], width);
+                s.layer = self.active_layer;
                 s.brush = brush;
                 s.points = line.iter().map(|q| to_local(k, origin, *q)).collect();
                 s.refresh_cache();
@@ -656,6 +667,58 @@ impl CanvasApp {
         self.changed();
     }
 
+    pub fn layer_action(&mut self, a: ui::LayerAction) {
+        use ui::LayerAction::*;
+        match a {
+            Add => {
+                let n = self.doc.layers.len() + 1;
+                self.active_layer = self.doc.add_layer(format!("Warstwa {n}"));
+            }
+            Select(id) => self.active_layer = id,
+            ToggleVisible(id) => {
+                if let Some(l) = self.doc.layers.iter_mut().find(|l| l.id == id) {
+                    l.visible = !l.visible;
+                }
+            }
+            Opacity(id, o) => {
+                if let Some(l) = self.doc.layers.iter_mut().find(|l| l.id == id) {
+                    l.opacity = o.clamp(0.0, 1.0);
+                }
+            }
+            Up(id) | Down(id) => {
+                let i = self.doc.layer_pos(id);
+                let j = if matches!(a, Up(_)) { i + 1 } else { i.wrapping_sub(1) };
+                if j < self.doc.layers.len() {
+                    self.doc.layers.swap(i, j);
+                }
+            }
+            Rename(id, name) => {
+                let name = name.trim();
+                if let Some(l) = self.doc.layers.iter_mut().find(|l| l.id == id)
+                    && !name.is_empty()
+                {
+                    l.name = name.chars().take(40).collect();
+                }
+            }
+            Delete(id) => {
+                if self.doc.layers.len() <= 1 {
+                    self.toast = Some(("Musi zostać co najmniej jedna warstwa".into(), Instant::now()));
+                    return;
+                }
+                // Its strokes go through the undo history; the layer itself is just removed.
+                let strokes: Vec<Stroke> = self.doc.strokes().filter(|s| s.layer == id).cloned().collect();
+                if !strokes.is_empty() {
+                    self.history.apply(&mut self.doc, Action::Remove(strokes));
+                }
+                self.doc.layers.retain(|l| l.id != id);
+                if self.active_layer == id {
+                    self.active_layer = self.doc.layers.last().map_or(0, |l| l.id);
+                }
+            }
+        }
+        self.changed();
+    }
+
     /// Flies to bookmark `i` (smooth zoom out → travel → zoom in).
     pub fn fly_to_bookmark(&mut self, i: usize) {
         self.bookmark_action(ui::BookmarkAction::Go(i));
@@ -692,6 +755,7 @@ impl CanvasApp {
         let visible = self.doc.query(&cam, evp, [0.0, 0.0, evp[0], evp[1]]);
         self.decode_images();
         let images = self.image_draws(&cam, evp);
+        let layer_opacity: Vec<f32> = self.doc.layers.iter().map(|l| l.opacity).collect();
         let px = renderer.render_rgba(
             device,
             queue,
@@ -702,6 +766,7 @@ impl CanvasApp {
                 doc: &self.doc,
                 active: None,
                 images: &images,
+                layer_opacity: &layer_opacity,
                 log_zoom: cam.log_zoom,
                 rotation: cam.rot(),
                 background: BACKGROUND,
@@ -734,8 +799,10 @@ impl CanvasApp {
         let mvp = [w as f64, h as f64];
         let visible = self.doc.query(&cam, mvp, [0.0, 0.0, mvp[0], mvp[1]]);
         let (device, queue, format) = target.device_queue_format();
-        // Magenta background: anything visibly different is ink (white ink included).
+        // Magenta background: anything visibly different is ink (white ink included). Layers at
+        // full opacity: faint layers still bound the fill.
         let bg = [1.0, 0.0, 1.0, 1.0];
+        let layer_opacity: Vec<f32> = Vec::new();
         let px = renderer.render_rgba(
             device,
             queue,
@@ -746,6 +813,7 @@ impl CanvasApp {
                 doc: &self.doc,
                 active: None,
                 images: &[],
+                layer_opacity: &layer_opacity,
                 log_zoom: cam.log_zoom,
                 rotation: cam.rot(),
                 background: bg,
@@ -774,6 +842,7 @@ impl CanvasApp {
         let col = self.tools.color;
         // The fill's thin edge (1 mask px) overlaps the surrounding ink slightly: no gaps.
         let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [col.r(), col.g(), col.b(), col.a()], (1.0 / k / frame.scale) as f32);
+        s.layer = self.active_layer;
         s.brush = Brush::Fill;
         for (i, l) in loops.iter().enumerate() {
             if i > 0 {
@@ -1101,6 +1170,7 @@ impl CanvasApp {
         let width_px = width_pt as f64 * self.pixels_per_point as f64;
         let id = self.doc.alloc_id();
         let mut stroke = Stroke::new(id, level, anchor, color, (width_px / frame.scale) as f32);
+        stroke.layer = self.active_layer;
         if !eraser {
             stroke.brush = self.tools.brush;
         }
@@ -1309,6 +1379,7 @@ impl CanvasApp {
         let mut gallery_actions = Vec::new();
         let mut photo_actions = Vec::new();
         let mut bookmark_actions = Vec::new();
+        let mut layer_actions = Vec::new();
         let mut finish_edit = false;
         let mut toast_visible = false;
         let mut rects = Vec::new();
@@ -1343,6 +1414,16 @@ impl CanvasApp {
                 self.safe_top,
             );
             if self.photo_panel.open {
+                r.push(egui::Rect::EVERYTHING);
+            }
+            let layers: Vec<ui::LayerInfo> = self
+                .doc
+                .layers
+                .iter()
+                .map(|l| ui::LayerInfo { id: l.id, name: l.name.clone(), visible: l.visible, opacity: l.opacity, active: l.id == self.active_layer })
+                .collect();
+            layer_actions = ui::layers_window(ui.ctx(), &mut self.layer_panel, &layers, self.safe_top);
+            if self.layer_panel.open {
                 r.push(egui::Rect::EVERYTHING);
             }
             let names: Vec<String> = self.doc.bookmarks.iter().map(|b| b.name.clone()).collect();
@@ -1399,6 +1480,14 @@ impl CanvasApp {
         for a in bookmark_actions {
             self.bookmark_action(a);
         }
+        for a in layer_actions {
+            self.layer_action(a);
+        }
+        if actions.layers {
+            self.layer_panel.open = !self.layer_panel.open;
+            self.bookmark_panel.open = false;
+            self.photo_panel.open = false;
+        }
         if actions.bookmarks {
             self.bookmark_panel.open = !self.bookmark_panel.open;
             self.photo_panel.open = false;
@@ -1439,6 +1528,7 @@ impl CanvasApp {
             let f = self.camera.level_frame(a.stroke.level, self.viewport);
             ActiveDraw {
                 stroke: &a.stroke,
+                layer: self.doc.layer_pos(a.stroke.layer) as u16,
                 offset: f.anchor_to_screen(&a.stroke.anchor, a.stroke.cache.anchor_fast),
                 scale: f.scale,
                 frozen: &a.frozen,
@@ -1446,6 +1536,7 @@ impl CanvasApp {
             }
         });
         let images = if self.screen == Screen::Canvas { self.image_draws(&self.camera, self.viewport) } else { Vec::new() };
+        let layer_opacity: Vec<f32> = self.doc.layers.iter().map(|l| l.opacity).collect();
         let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
         renderer.render_target(
             target,
@@ -1454,6 +1545,7 @@ impl CanvasApp {
                 doc: &self.doc,
                 active,
                 images: &images,
+                layer_opacity: &layer_opacity,
                 log_zoom: self.camera.log_zoom,
                 rotation: self.camera.rot(),
                 background: BACKGROUND,

@@ -119,6 +119,14 @@ razem Android pyta o dostęp do zdjęć; na komputerze: obrazy z `~/Obrazy`, `~/
 
 Zdjęcie jest zapisywane w projekcie (JPEG, maks. 2048 px).
 
+### Warstwy
+
+**Więcej → Warstwy…**: lista warstw (górna na górze). Stuknięcie nazwy wybiera warstwę, na której
+rysujesz (także gumka, wypełnienie i rysunki ze zdjęć trafiają na nią). Każda warstwa ma krycie
+(suwak), „Ukryj/Pokaż”, „W górę/W dół”, zmianę nazwy i usuwanie (z kreskami; kreski da się
+przywrócić „Cofnij”). Gumka ściera tylko na swojej warstwie. Każda warstwa jest renderowana do
+osobnej przezroczystej tekstury i nakładana z własnym kryciem.
+
 ### Zakładki
 
 **Więcej → Zakładki…**: „Dodaj zakładkę” zapamiętuje obecny widok (miejsce, przybliżenie, obrót).
@@ -159,7 +167,7 @@ jest renderowana z wektorów przy wyjściu z projektu i co ~20 s podczas rysowan
 ## Zapis
 
 Rysunek zapisuje się automatycznie ~1,5 s po każdej zmianie oraz przy wyjściu/wstrzymaniu
-aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 7; starsze wersje nadal się
+aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 8; starsze wersje nadal się
 wczytują), dane w `postcard`. Zapis jest
 atomowy (plik tymczasowy + rename). Uszkodzony plik nie jest nadpisywany – zostaje przemianowany
 na `*.broken`.

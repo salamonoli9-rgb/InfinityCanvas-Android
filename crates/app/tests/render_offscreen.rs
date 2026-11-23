@@ -771,3 +771,56 @@ fn shape_guides() {
     assert!(dark(&px, 520, 205) && dark(&px, 520, 140) && dark(&px, 455, 205), "filled circle");
     assert!(!dark(&px, 460, 145), "circle, not a square");
 }
+
+#[test]
+fn layers_erase_hide_opacity_and_order() {
+    use infinite_canvas::ui::LayerAction;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    let at = |px: &[u8], x: u32, y: u32| { let i = ((y * W + x) * 4) as usize; [px[i], px[i + 1], px[i + 2]] };
+    // Bottom layer: a red horizontal line.
+    app.tools.color = egui::Color32::from_rgb(230, 30, 30);
+    draw_line(&mut app, 200.0, 100.0, 600.0);
+    let bottom = app.active_layer;
+    // Top layer: a blue vertical line crossing it, and an eraser over the crossing.
+    app.layer_action(LayerAction::Add);
+    let top = app.active_layer;
+    assert_ne!(top, bottom);
+    app.tools.color = egui::Color32::from_rgb(30, 30, 230);
+    draw_path(&mut app, &[[350.0, 130.0], [350.0, 280.0]], 5.0);
+    let px = gpu.frame(&mut app);
+    assert!(at(&px, 350, 200)[2] > 180, "blue on top: {:?}", at(&px, 350, 200));
+    app.tools.tool = infinite_canvas::ui::Tool::Eraser;
+    app.tools.eraser = 30.0;
+    mouse(&mut app, Phase::Down, [350.0, 200.0], 9.0);
+    mouse(&mut app, Phase::Up, [350.0, 200.0], 9.1);
+    let px = gpu.frame(&mut app);
+    let c = at(&px, 350, 200);
+    assert!(c[0] > 180 && c[2] < 90, "eraser on the top layer reveals the red line below: {c:?}");
+    assert!(at(&px, 350, 260)[2] > 180, "blue line elsewhere intact");
+    // Top layer at half opacity: the blue line becomes lighter.
+    app.layer_action(LayerAction::Opacity(top, 0.5));
+    let c = at(&gpu.frame(&mut app), 350, 260);
+    assert!(c[0] > 100 && c[2] > 180, "half-transparent blue: {c:?}");
+    // Hide the bottom layer: the red line disappears.
+    app.layer_action(LayerAction::ToggleVisible(bottom));
+    assert!(at(&gpu.frame(&mut app), 200, 200)[1] > 200);
+    app.layer_action(LayerAction::ToggleVisible(bottom));
+    // Move the blue layer below the red one: at a crossing point away from the eraser, red wins.
+    app.layer_action(LayerAction::Opacity(top, 1.0));
+    draw_path(&mut app, &[[500.0, 130.0], [500.0, 280.0]], 12.0); // tools: eraser still selected
+    app.tools.tool = infinite_canvas::ui::Tool::Pen;
+    draw_path(&mut app, &[[500.0, 130.0], [500.0, 280.0]], 15.0);
+    assert!(at(&gpu.frame(&mut app), 500, 200)[2] > 180, "blue over red");
+    app.layer_action(LayerAction::Down(top));
+    let c = at(&gpu.frame(&mut app), 500, 200);
+    assert!(c[0] > 180 && c[2] < 90, "after moving the layer down, red is on top: {c:?}");
+    // The layers survive saving.
+    let bytes = canvas_core::io::encode(&app.doc, &app.camera);
+    let (doc, _) = canvas_core::io::decode(&bytes).unwrap();
+    assert_eq!(doc.layers.len(), 2);
+    assert_eq!(doc.layers[0].id, top);
+}

@@ -198,6 +198,8 @@ struct ImageVertex {
 /// The stroke in progress: already tessellated parts plus the points after them.
 pub struct ActiveDraw<'a> {
     pub stroke: &'a Stroke,
+    /// Position of its layer.
+    pub layer: u16,
     pub offset: [f64; 2],
     pub scale: f64,
     pub frozen: &'a [Mesh],
@@ -213,6 +215,8 @@ pub struct FrameInput<'a> {
     pub active: Option<ActiveDraw<'a>>,
     /// Reference photos to draw below the strokes, bottom first.
     pub images: &'a [ImageDraw<'a>],
+    /// Opacity of each layer, by layer position (`VisibleStroke::layer`); missing = 1.
+    pub layer_opacity: &'a [f32],
     pub log_zoom: f64,
     /// (cos, sin) of the view rotation.
     pub rotation: [f64; 2],
@@ -246,6 +250,8 @@ pub struct Renderer {
     pipeline_erase: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
+    /// Layer opacities for the composite shader (64 × vec4).
+    layer_opacity_buf: wgpu::Buffer,
     image_pipeline: wgpu::RenderPipeline,
     image_bgl: wgpu::BindGroupLayout,
     image_sampler: wgpu::Sampler,
@@ -384,16 +390,28 @@ impl Renderer {
         });
         let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("composite bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let composite_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("composite pl"),
@@ -504,6 +522,7 @@ impl Renderer {
             pipeline_erase,
             composite_pipeline,
             composite_bgl,
+            layer_opacity_buf: mk("layer opacity", 64 * 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             image_pipeline,
             image_bgl,
             image_sampler,
@@ -805,6 +824,8 @@ impl Renderer {
 
         let mut instances: Vec<Instance> = Vec::with_capacity(input.visible.len() + 1);
         let mut kinds: Vec<Kind> = Vec::with_capacity(input.visible.len() + 1);
+        // Layer position of each draw.
+        let mut draw_layers: Vec<u16> = Vec::with_capacity(input.visible.len() + 1);
         let mut draws: Vec<Draw> = Vec::with_capacity(input.visible.len() + 1);
         let mut dyn_v: Vec<[f32; 3]> = Vec::new();
         let mut dyn_i: Vec<u32> = Vec::new();
@@ -846,6 +867,7 @@ impl Renderer {
                     let instance = instances.len() as u32;
                     instances.push(Instance { offset: f32x2(v.offset), rs: rs(v.scale), color, params: grain });
                     kinds.push(kind);
+                    draw_layers.push(v.layer);
                     draws.push(Draw::Cached {
                         chunk: m.chunk,
                         base_vertex: m.base_vertex,
@@ -876,6 +898,7 @@ impl Renderer {
                     // for the grain; at this magnification it is faded out anyway.
                     instances.push(Instance { offset: [0.0, 0.0], rs: [1.0, 0.0], color, params: [0.0; 4] });
                     kinds.push(kind);
+                    draw_layers.push(v.layer);
                     draws.push(Draw::Dynamic {
                         base_vertex: base as i32,
                         first_index: first as u32,
@@ -903,6 +926,7 @@ impl Renderer {
                 let instance = instances.len() as u32;
                 instances.push(Instance { offset: f32x2(a.offset), rs: rs(a.scale), color, params });
                 kinds.push(kind);
+                draw_layers.push(a.layer);
                 draws.push(Draw::Dynamic {
                     base_vertex: base as i32,
                     first_index: first as u32,
@@ -1000,7 +1024,10 @@ impl Renderer {
             let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("composite"),
                 layout: &self.composite_bgl,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer) }],
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer) },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.layer_opacity_buf.as_entire_binding() },
+                ],
             });
             self.targets = Some(Targets { size, msaa, stencil, layer, composite });
         }
@@ -1025,87 +1052,28 @@ impl Renderer {
             egui_cmds = self.egui.update_buffers(device, queue, &mut encoder, prims, &screen);
         }
 
-        // 1. Strokes into the transparent layer (MSAA, resolved into `layer`).
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("strokes"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: if MSAA > 1 { &targets.msaa } else { &targets.layer },
-                        depth_slice: None,
-                        resolve_target: if MSAA > 1 { Some(&targets.layer) } else { None },
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: if MSAA > 1 { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &targets.stencil,
-                        depth_ops: None,
-                        stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
-                    }),
-                    ..Default::default()
-                })
-                .forget_lifetime();
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            let mut stencil_ref = 0u32;
-            pass.set_vertex_buffer(1, self.instance_buf.slice(..));
-            let mut bound: Option<usize> = None; // usize::MAX = dynamic buffers
-            let mut kind_bound: Option<Kind> = None;
-            for d in &draws {
-                let (Draw::Cached { instance, .. } | Draw::Dynamic { instance, .. }) = *d;
-                let kind = kinds[instance as usize];
-                if kind_bound != Some(kind) {
-                    pass.set_pipeline(match kind {
-                        Kind::Opaque => &self.pipeline_opaque,
-                        Kind::Blend => &self.pipeline,
-                        Kind::Erase => &self.pipeline_erase,
-                    });
-                    kind_bound = Some(kind);
-                }
-                if kind == Kind::Blend {
-                    // 1..=255, cycling. A repeat can only clash with a stroke 255 translucent
-                    // strokes earlier at the same pixel that nothing translucent covered since.
-                    stencil_ref = stencil_ref % 255 + 1;
-                    pass.set_stencil_reference(stencil_ref);
-                }
-                match *d {
-                    Draw::Cached { chunk, base_vertex, first_index, count, instance } => {
-                        if bound != Some(chunk) {
-                            pass.set_vertex_buffer(0, self.chunks[chunk].vbuf.slice(..));
-                            pass.set_index_buffer(self.chunks[chunk].ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                            bound = Some(chunk);
-                        }
-                        pass.draw_indexed(first_index..first_index + count, base_vertex, instance..instance + 1);
-                    }
-                    Draw::Dynamic { base_vertex, first_index, count, instance } => {
-                        if bound != Some(usize::MAX) {
-                            pass.set_vertex_buffer(0, self.dyn_vbuf.slice(..));
-                            pass.set_index_buffer(self.dyn_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                            bound = Some(usize::MAX);
-                        }
-                        pass.draw_indexed(first_index..first_index + count, base_vertex, instance..instance + 1);
-                    }
-                }
-            }
+        // Layer opacities for the composite shader.
+        let mut ops = [[0.0f32; 4]; 64];
+        for (i, o) in ops.iter_mut().enumerate() {
+            o[0] = input.layer_opacity.get(i).copied().unwrap_or(1.0);
         }
-        // 2. Background, the layer on top, then the UI.
+        queue.write_buffer(&self.layer_opacity_buf, 0, bytemuck::cast_slice(&ops));
+        // Draw order: layer by layer (bottom first), drawing order within a layer.
+        let mut order: Vec<usize> = (0..draws.len()).collect();
+        order.sort_by_key(|&i| draw_layers[i]);
+
+        // 1. Background and photos.
         {
             let bg = input.background;
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("screen"),
+                    label: Some("background"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view,
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: bg[0] as f64,
-                                g: bg[1] as f64,
-                                b: bg[2] as f64,
-                                a: bg[3] as f64,
-                            }),
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: bg[0] as f64, g: bg[1] as f64, b: bg[2] as f64, a: bg[3] as f64 }),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -1121,12 +1089,117 @@ impl Renderer {
                     pass.draw(*a..*b, 0..1);
                 }
             }
-            pass.set_pipeline(&self.composite_pipeline);
-            pass.set_bind_group(0, &targets.composite, &[]);
-            pass.draw(0..3, 0..1);
-            if let Some((prims, _)) = input.egui {
-                self.egui.render(&mut pass, prims, &screen);
+        }
+
+        // 2. Each layer: its strokes into the transparent layer texture (MSAA, resolved), where
+        // its erasers clear pixels; then that texture over the screen with the layer's opacity.
+        let mut i = 0;
+        while i < order.len() {
+            let layer = draw_layers[order[i]];
+            let mut j = i;
+            while j < order.len() && draw_layers[order[j]] == layer {
+                j += 1;
             }
+            {
+                let mut pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("strokes"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: if MSAA > 1 { &targets.msaa } else { &targets.layer },
+                            depth_slice: None,
+                            resolve_target: if MSAA > 1 { Some(&targets.layer) } else { None },
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: if MSAA > 1 { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &targets.stencil,
+                            depth_ops: None,
+                            stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+                        }),
+                        ..Default::default()
+                    })
+                    .forget_lifetime();
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(1, self.instance_buf.slice(..));
+                let mut stencil_ref = 0u32;
+                let mut bound: Option<usize> = None; // usize::MAX = dynamic buffers
+                let mut kind_bound: Option<Kind> = None;
+                for &k in &order[i..j] {
+                    let d = &draws[k];
+                    let (Draw::Cached { instance, .. } | Draw::Dynamic { instance, .. }) = *d;
+                    let kind = kinds[instance as usize];
+                    if kind_bound != Some(kind) {
+                        pass.set_pipeline(match kind {
+                            Kind::Opaque => &self.pipeline_opaque,
+                            Kind::Blend => &self.pipeline,
+                            Kind::Erase => &self.pipeline_erase,
+                        });
+                        kind_bound = Some(kind);
+                    }
+                    if kind == Kind::Blend {
+                        // 1..=255, cycling. A repeat can only clash with a stroke 255 translucent
+                        // strokes earlier at the same pixel that nothing translucent covered since.
+                        stencil_ref = stencil_ref % 255 + 1;
+                        pass.set_stencil_reference(stencil_ref);
+                    }
+                    match *d {
+                        Draw::Cached { chunk, base_vertex, first_index, count, instance } => {
+                            if bound != Some(chunk) {
+                                pass.set_vertex_buffer(0, self.chunks[chunk].vbuf.slice(..));
+                                pass.set_index_buffer(self.chunks[chunk].ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                                bound = Some(chunk);
+                            }
+                            pass.draw_indexed(first_index..first_index + count, base_vertex, instance..instance + 1);
+                        }
+                        Draw::Dynamic { base_vertex, first_index, count, instance } => {
+                            if bound != Some(usize::MAX) {
+                                pass.set_vertex_buffer(0, self.dyn_vbuf.slice(..));
+                                pass.set_index_buffer(self.dyn_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                                bound = Some(usize::MAX);
+                            }
+                            pass.draw_indexed(first_index..first_index + count, base_vertex, instance..instance + 1);
+                        }
+                    }
+                }
+            }
+            {
+                let mut pass = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("composite"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        })],
+                        ..Default::default()
+                    })
+                    .forget_lifetime();
+                pass.set_pipeline(&self.composite_pipeline);
+                pass.set_bind_group(0, &targets.composite, &[]);
+                let l = layer as u32;
+                pass.draw(0..3, l..l + 1);
+            }
+            i = j;
+        }
+
+        // 3. The UI on top.
+        if let Some((prims, _)) = input.egui {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ui"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    })],
+                    ..Default::default()
+                })
+                .forget_lifetime();
+            self.egui.render(&mut pass, prims, &screen);
         }
         queue.submit(egui_cmds.into_iter().chain(std::iter::once(encoder.finish())));
         self.timings.submit = t_submit.elapsed().as_secs_f64();
