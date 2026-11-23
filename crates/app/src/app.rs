@@ -114,6 +114,8 @@ pub struct CanvasApp {
     pending_preview: Option<image::RgbaImage>,
     /// Screen point of a bucket fill to do on the next frame (it needs the renderer).
     pending_bucket: Option<[f64; 2]>,
+    /// Export the view as a picture on the next frame.
+    pending_export: bool,
     /// Short message at the bottom of the screen, with the time it appeared.
     toast: Option<(String, Instant)>,
     save_thread: Option<std::thread::JoinHandle<()>>,
@@ -241,6 +243,7 @@ impl CanvasApp {
             pending_photo: None,
             pending_preview: None,
             pending_bucket: None,
+            pending_export: false,
             toast: None,
             save_thread: None,
             clear_render_cache: false,
@@ -607,6 +610,61 @@ impl CanvasApp {
         self.history.apply(&mut self.doc, Action::Add(strokes));
         self.changed();
         Ok(n)
+    }
+
+    /// Exports the view as a picture (on the next frame).
+    pub fn export(&mut self) {
+        self.pending_export = true;
+        self.wants_redraw = true;
+    }
+
+    /// Renders the current view at twice the screen resolution and hands it to the photo
+    /// library to be encoded and saved (phone gallery / Pictures folder).
+    fn export_png(&mut self, target: Target, renderer: &mut Renderer) {
+        if self.photo_lib.is_none() {
+            self.toast = Some(("Eksport nie jest dostępny na tym urządzeniu".into(), Instant::now()));
+            return;
+        }
+        let vp = self.viewport;
+        let (device, queue, format) = target.device_queue_format();
+        let max = device.limits().max_texture_dimension_2d.min(8192) as f64;
+        let k = (2.0f64).min(max / vp[0]).min(max / vp[1]);
+        let w = (((vp[0] * k) / 64.0).floor() as u32 * 64).max(64);
+        let k = w as f64 / vp[0];
+        let h = ((vp[1] * k).round() as u32).max(1);
+        let mut cam = self.camera.clone();
+        cam.log_zoom += k.log2();
+        let evp = [w as f64, h as f64];
+        let visible = self.doc.query(&cam, evp, [0.0, 0.0, evp[0], evp[1]]);
+        self.decode_images();
+        let images = self.image_draws(&cam, evp);
+        let px = renderer.render_rgba(
+            device,
+            queue,
+            format,
+            [w, h],
+            FrameInput {
+                visible: &visible,
+                doc: &self.doc,
+                active: None,
+                images: &images,
+                log_zoom: cam.log_zoom,
+                rotation: cam.rot(),
+                background: BACKGROUND,
+                egui: None,
+                textures: Default::default(),
+            },
+        );
+        let Some(img) = image::RgbaImage::from_raw(w, h, px) else {
+            self.toast = Some(("Nie udało się wyrenderować obrazu".into(), Instant::now()));
+            return;
+        };
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let base = if self.project.is_empty() { "rysunek".to_string() } else { self.project.clone() };
+        if let Some(lib) = self.photo_lib.as_mut() {
+            lib.save_png(format!("{base}-{stamp}"), img);
+        }
+        self.toast = Some(("Zapisywanie obrazu…".into(), Instant::now()));
     }
 
     /// Bucket fill: renders the current view offscreen, floods the enclosed area around the
@@ -1132,6 +1190,18 @@ impl CanvasApp {
         if let Some(pos) = self.pending_bucket.take() {
             self.bucket_fill(target, renderer, pos);
         }
+        if std::mem::take(&mut self.pending_export) {
+            self.export_png(target, renderer);
+        }
+        if let Some(r) = self.photo_lib.as_mut().and_then(|l| l.saved.take()) {
+            self.toast = Some((
+                match r {
+                    Ok(place) => format!("Zapisano: {place}"),
+                    Err(e) => format!("Nie zapisano: {e}"),
+                },
+                Instant::now(),
+            ));
+        }
 
         // UI.
         let info = ui::Info {
@@ -1225,6 +1295,10 @@ impl CanvasApp {
         }
         for a in photo_actions {
             self.photo_action(a);
+        }
+        if actions.export {
+            self.pending_export = true;
+            self.wants_redraw = true;
         }
         if actions.photos {
             self.photo_panel.open = !self.photo_panel.open;

@@ -667,3 +667,46 @@ fn bucket_fill_fills_the_enclosed_area() {
     app.undo();
     assert!(!red({ let px = gpu.frame(&mut app); let i = ((260 * W + 450) * 4) as usize; [px[i], px[i + 1], px[i + 2]] }));
 }
+
+#[test]
+fn export_saves_a_double_resolution_png() {
+    use infinite_canvas::photos::{PhotoBackend, PhotoEntry};
+    use std::sync::{Arc, Mutex};
+    type Saved = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+    struct Capture(Saved);
+    impl PhotoBackend for Capture {
+        fn list(&mut self) -> Result<Vec<PhotoEntry>, String> {
+            Err("none".into())
+        }
+        fn read(&mut self, _: &str) -> Option<Vec<u8>> {
+            None
+        }
+        fn save_png(&mut self, name: &str, png: &[u8]) -> Result<String, String> {
+            *self.0.lock().unwrap() = Some((name.to_string(), png.to_vec()));
+            Ok("test".into())
+        }
+    }
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let saved = Arc::new(Mutex::new(None));
+    let mut app = new_app();
+    app.set_photo_backend(Box::new(Capture(saved.clone())));
+    draw_line(&mut app, 200.0, 100.0, 600.0);
+    app.export();
+    for _ in 0..200 {
+        gpu.frame(&mut app);
+        if saved.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let (name, png) = saved.lock().unwrap().clone().expect("exported");
+    assert!(name.starts_with("rysunek-"));
+    let img = image::load_from_memory(&png).unwrap().to_rgba8();
+    assert_eq!(img.dimensions(), (2 * W, 2 * H), "twice the screen resolution");
+    // The line (y = 200 on screen) is at y = 400 in the picture; no toolbar in the export.
+    assert!(img.get_pixel(700, 400).0[0] < 100, "line drawn");
+    assert!(img.get_pixel(100, 60).0[0] > 200, "no UI in the picture");
+}

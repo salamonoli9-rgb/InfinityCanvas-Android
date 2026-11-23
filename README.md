@@ -115,6 +115,12 @@ razem Android pyta o dostęp do zdjęć; na komputerze: obrazy z `~/Obrazy`, `~/
 
 Zdjęcie jest zapisywane w projekcie (JPEG, maks. 2048 px).
 
+### Eksport
+
+Przycisk **Eksport** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej
+rozdzielczości ekranu: na telefonie w galerii (Obrazy → „Nieskończone płótno”), na komputerze w
+`~/Obrazy/Nieskończone płótno/`.
+
 ### Gesty
 
 | Akcja | Gest |

@@ -167,6 +167,43 @@ impl MediaStorePhotos {
         Ok(RgbaImage::from_raw(w as u32, h as u32, rgba))
     }
 
+    /// Inserts a PNG into MediaStore under Pictures/<EXPORT_FOLDER> (no permission needed for
+    /// the app's own files on Android 10+).
+    fn save_inner(&self, env: &mut JNIEnv, name: &str, png: &[u8]) -> JResult<Option<String>> {
+        let resolver = self.resolver(env)?;
+        let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+        let put = |env: &mut JNIEnv, k: &str, v: &str| -> JResult<()> {
+            let k = env.new_string(k)?;
+            let v = env.new_string(v)?;
+            env.call_method(&values, "put", "(Ljava/lang/String;Ljava/lang/String;)V", &[JValue::Object(&k), JValue::Object(&v)])?;
+            Ok(())
+        };
+        put(env, "_display_name", &format!("{name}.png"))?;
+        put(env, "mime_type", "image/png")?;
+        let folder = format!("Pictures/{}", crate::photos::EXPORT_FOLDER);
+        if self.sdk >= 29 {
+            put(env, "relative_path", &folder)?;
+        }
+        let uri = Self::images_uri(env)?;
+        let item = env
+            .call_method(&resolver, "insert", "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;", &[JValue::Object(&uri), JValue::Object(&values)])?
+            .l()?;
+        if item.is_null() {
+            return Ok(None);
+        }
+        let stream = env.call_method(&resolver, "openOutputStream", "(Landroid/net/Uri;)Ljava/io/OutputStream;", &[JValue::Object(&item)])?.l()?;
+        if stream.is_null() {
+            return Ok(None);
+        }
+        for chunk in png.chunks(1 << 20) {
+            let arr = env.byte_array_from_slice(chunk)?;
+            env.call_method(&stream, "write", "([B)V", &[JValue::Object(&arr)])?;
+            env.delete_local_ref(arr)?;
+        }
+        env.call_method(&stream, "close", "()V", &[])?;
+        Ok(Some(format!("Galeria → {folder}")))
+    }
+
     /// Runs `f` with an attached env; Java exceptions become `None`.
     fn with_env<T>(&self, f: impl FnOnce(&Self, &mut JNIEnv) -> JResult<T>) -> Option<T> {
         let mut env = self.vm.attach_current_thread().ok()?;
@@ -204,6 +241,10 @@ impl PhotoBackend for MediaStorePhotos {
 
     fn thumbnail(&mut self, key: &str, side: u32) -> Option<RgbaImage> {
         self.with_env(|s, env| s.thumbnail_inner(env, key, side)).flatten()
+    }
+
+    fn save_png(&mut self, name: &str, png: &[u8]) -> Result<String, String> {
+        self.with_env(|s, env| s.save_inner(env, name, png)).flatten().ok_or_else(|| "Nie udało się zapisać obrazu".to_string())
     }
 
     fn request_access(&mut self) {

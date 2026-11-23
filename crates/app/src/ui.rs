@@ -95,6 +95,8 @@ pub struct Actions {
     pub upright: bool,
     /// Open the photos window.
     pub photos: bool,
+    /// Export the view as a picture.
+    pub export: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -171,6 +173,7 @@ fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
 
 fn photos_button(ui: &mut egui::Ui, a: &mut Actions) {
     a.photos |= ui.button("Zdjęcia").on_hover_text("Zdjęcie do odrysowania").clicked();
+    a.export |= ui.button("Eksport").on_hover_text("Zapisz widok jako obraz PNG").clicked();
 }
 
 fn menu_button(ui: &mut egui::Ui, a: &mut Actions) {

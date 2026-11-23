@@ -70,9 +70,15 @@ pub trait PhotoBackend: Send {
     }
     /// Asks the system for access to photos (Android permission dialog).
     fn request_access(&mut self) {}
+    /// Saves an exported PNG where the user finds pictures; returns a description of where.
+    fn save_png(&mut self, name: &str, png: &[u8]) -> Result<String, String>;
 }
 
+/// Folder name for exported pictures.
+pub const EXPORT_FOLDER: &str = "Nieskończone płótno";
+
 enum Request {
+    Save(String, RgbaImage),
     List,
     Thumb(String),
     Read(String),
@@ -80,6 +86,7 @@ enum Request {
 }
 
 enum Response {
+    Saved(Result<String, String>),
     List(Result<Vec<PhotoEntry>, String>),
     Thumb(String, Option<RgbaImage>),
     Read(String, Option<Vec<u8>>),
@@ -96,6 +103,8 @@ pub struct PhotoLibrary {
     requested: HashSet<String>,
     /// Bytes of a photo the user picked, once loaded.
     pub loaded: Option<(String, Option<Vec<u8>>)>,
+    /// Result of the last export.
+    pub saved: Option<Result<String, String>>,
     pub busy: bool,
 }
 
@@ -108,6 +117,9 @@ impl PhotoLibrary {
         std::thread::spawn(move || {
             for req in worker_rx {
                 let resp = match req {
+                    Request::Save(name, img) => Response::Saved(
+                        encode_png(&img).ok_or_else(|| "Nie udało się zakodować obrazu".to_string()).and_then(|png| backend.save_png(&name, &png)),
+                    ),
                     Request::List => Response::List(backend.list()),
                     Request::Thumb(k) => {
                         let t = backend.thumbnail(&k, THUMB_SIDE);
@@ -137,7 +149,7 @@ impl PhotoLibrary {
                 }
             }
         });
-        Self { tx, rx, entries: None, listing: false, thumbs: HashMap::new(), requested: HashSet::new(), loaded: None, busy: false }
+        Self { tx, rx, entries: None, listing: false, thumbs: HashMap::new(), requested: HashSet::new(), loaded: None, saved: None, busy: false }
     }
 
     /// (Re)lists the photos.
@@ -159,6 +171,12 @@ impl PhotoLibrary {
         let _ = self.tx.send(Request::Read(key.to_string()));
     }
 
+    /// Encodes (on the worker thread) and saves an exported picture.
+    pub fn save_png(&mut self, name: String, img: RgbaImage) {
+        self.busy = true;
+        let _ = self.tx.send(Request::Save(name, img));
+    }
+
     pub fn request_access(&mut self) {
         self.listing = true;
         let _ = self.tx.send(Request::Access);
@@ -170,6 +188,10 @@ impl PhotoLibrary {
         while let Ok(r) = self.rx.try_recv() {
             changed = true;
             match r {
+                Response::Saved(r) => {
+                    self.busy = false;
+                    self.saved = Some(r);
+                }
                 Response::List(l) => {
                     self.listing = false;
                     self.entries = Some(l);
@@ -243,6 +265,23 @@ impl PhotoBackend for FolderPhotos {
     fn read(&mut self, key: &str) -> Option<Vec<u8>> {
         std::fs::read(key).ok()
     }
+
+    fn save_png(&mut self, name: &str, png: &[u8]) -> Result<String, String> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        let base = ["Obrazy", "Pictures"].iter().map(|d| home.join(d)).find(|d| d.is_dir()).unwrap_or(home);
+        let dir = base.join(EXPORT_FOLDER);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(format!("{name}.png"));
+        std::fs::write(&path, png).map_err(|e| e.to_string())?;
+        Ok(path.display().to_string())
+    }
+}
+
+/// PNG-encodes RGBA pixels.
+pub fn encode_png(rgba: &RgbaImage) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    rgba.write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+    Some(out)
 }
 
 #[cfg(test)]
