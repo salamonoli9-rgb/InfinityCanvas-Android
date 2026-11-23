@@ -122,6 +122,8 @@ pub struct CanvasApp {
     layer_panel: ui::LayerPanel,
     /// Id of the layer new strokes go to.
     pub active_layer: u32,
+    /// Strokes added since the last frame (rendered without delay).
+    urgent: Vec<canvas_core::stroke::StrokeId>,
     /// Camera flight to a bookmark in progress, with its start time.
     flight: Option<(canvas_core::flight::Flight, Instant)>,
     /// Short message at the bottom of the screen, with the time it appeared.
@@ -255,6 +257,7 @@ impl CanvasApp {
             bookmark_panel: ui::BookmarkPanel::default(),
             layer_panel: ui::LayerPanel::default(),
             active_layer: 0,
+            urgent: Vec::new(),
             flight: None,
             toast: None,
             save_thread: None,
@@ -360,6 +363,7 @@ impl CanvasApp {
                 active: None,
                 images: &images,
                 layer_opacity: &layer_opacity,
+                urgent: &[],
                 log_zoom: cam.log_zoom,
                 rotation: cam.rot(),
                 background: BACKGROUND,
@@ -767,6 +771,7 @@ impl CanvasApp {
                 active: None,
                 images: &images,
                 layer_opacity: &layer_opacity,
+                urgent: &[],
                 log_zoom: cam.log_zoom,
                 rotation: cam.rot(),
                 background: BACKGROUND,
@@ -814,6 +819,7 @@ impl CanvasApp {
                 active: None,
                 images: &[],
                 layer_opacity: &layer_opacity,
+                urgent: &[],
                 log_zoom: cam.log_zoom,
                 rotation: cam.rot(),
                 background: bg,
@@ -855,6 +861,7 @@ impl CanvasApp {
             }
         }
         s.refresh_cache();
+        self.urgent.push(s.id);
         self.history.apply(&mut self.doc, Action::Add(vec![s]));
         self.changed();
     }
@@ -1120,6 +1127,7 @@ impl CanvasApp {
                         }
                     }
                     s.refresh_cache();
+                    self.urgent.push(s.id);
                     self.history.apply(&mut self.doc, Action::Add(vec![s]));
                     self.changed();
                 }
@@ -1519,6 +1527,7 @@ impl CanvasApp {
         }
 
         // Scene.
+        let urgent = std::mem::take(&mut self.urgent);
         self.decode_images();
         let full = [0.0, 0.0, self.viewport[0], self.viewport[1]];
         let tq = Instant::now();
@@ -1546,6 +1555,7 @@ impl CanvasApp {
                 active,
                 images: &images,
                 layer_opacity: &layer_opacity,
+                urgent: &urgent,
                 log_zoom: self.camera.log_zoom,
                 rotation: self.camera.rot(),
                 background: BACKGROUND,

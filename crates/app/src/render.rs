@@ -6,7 +6,7 @@
 //! on the CPU and clipped to a guard band before being uploaded (see [`push_cpu_path`]).
 
 use canvas_core::document::VisibleStroke;
-use canvas_core::mesh::{Mesh, lod_for, tessellate, tessellate_part};
+use canvas_core::mesh::{MAX_LOD, Mesh, lod_for, tessellate, tessellate_part};
 use canvas_core::stroke::{Stroke, StrokeId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,9 +21,54 @@ const VERTEX_SIZE: u64 = 12;
 const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 const CHUNK_INDICES: u64 = 3 << 20;
 /// Meshes unused for this many frames are evicted.
-const EVICT_FRAMES: u64 = 600;
+const EVICT_FRAMES: u64 = 20_000;
 /// Time budget per frame for tessellating meshes that are not cached yet.
 const TESSELLATION_BUDGET: Duration = Duration::from_millis(6);
+/// Strokes with no mesh at all and at most this many points are tessellated right away (a
+/// stroke just drawn must never blink out); everything else goes to the worker threads.
+const SYNC_POINTS: usize = 1500;
+/// A cached mesh up to this many LODs finer than needed is used as is (no re-tessellation
+/// when zooming out; finer geometry just costs a few more triangles).
+const LOD_SLACK: u32 = 2;
+
+/// Background tessellation: worker threads turn strokes into meshes; the render thread only
+/// uploads finished meshes, so zooming over a big drawing never stalls a frame.
+struct Workers {
+    jobs: std::sync::mpsc::Sender<(u64, StrokeId, u32, Stroke)>,
+    results: std::sync::mpsc::Receiver<(u64, StrokeId, u32, Mesh)>,
+    pending: std::collections::HashSet<(StrokeId, u32)>,
+    /// Bumped when the document changes completely: results for older jobs are dropped.
+    generation: u64,
+}
+
+impl Workers {
+    fn new() -> Self {
+        let (jobs, job_rx) = std::sync::mpsc::channel::<(u64, StrokeId, u32, Stroke)>();
+        let (res_tx, results) = std::sync::mpsc::channel();
+        let job_rx = Arc::new(std::sync::Mutex::new(job_rx));
+        let n = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(1).clamp(1, 4);
+        for i in 0..n {
+            let rx = job_rx.clone();
+            let tx = res_tx.clone();
+            let _ = std::thread::Builder::new().name(format!("tessellate-{i}")).spawn(move || {
+                loop {
+                    let job = rx.lock().ok().and_then(|r| r.recv().ok());
+                    let Some((generation, id, lod, stroke)) = job else { break };
+                    if tx.send((generation, id, lod, tessellate(&stroke, lod))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Self { jobs, results, pending: Default::default(), generation: 0 }
+    }
+
+    fn request(&mut self, stroke: &Stroke, lod: u32) {
+        if self.pending.len() < 20_000 && self.pending.insert((stroke.id, lod)) {
+            let _ = self.jobs.send((self.generation, stroke.id, lod, stroke.clone()));
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -215,6 +260,9 @@ pub struct FrameInput<'a> {
     pub active: Option<ActiveDraw<'a>>,
     /// Reference photos to draw below the strokes, bottom first.
     pub images: &'a [ImageDraw<'a>],
+    /// Strokes added this frame (just drawn): tessellated right away, whatever the budget, so
+    /// a finished stroke never blinks out.
+    pub urgent: &'a [StrokeId],
     /// Opacity of each layer, by layer position (`VisibleStroke::layer`); missing = 1.
     pub layer_opacity: &'a [f32],
     pub log_zoom: f64,
@@ -263,6 +311,7 @@ pub struct Renderer {
     targets: Option<Targets>,
     chunks: Vec<Chunk>,
     meshes: HashMap<(StrokeId, u32), CachedMesh>,
+    workers: Workers,
     cpu_meshes: HashMap<(StrokeId, u32), (Arc<Mesh>, u64)>,
     instance_buf: wgpu::Buffer,
     instance_cap: u64,
@@ -534,6 +583,7 @@ impl Renderer {
             targets: None,
             chunks: Vec::new(),
             meshes: HashMap::new(),
+            workers: Workers::new(),
             cpu_meshes: HashMap::new(),
             instance_buf: mk("instances", 1024 * std::mem::size_of::<Instance>() as u64, vu),
             instance_cap: 1024,
@@ -691,6 +741,8 @@ impl Renderer {
     /// Forget every cached mesh of a stroke (e.g. after it changed).
     pub fn clear_cache(&mut self) {
         self.image_textures.clear();
+        self.workers.generation += 1;
+        self.workers.pending.clear();
         self.meshes.clear();
         self.cpu_meshes.clear();
         for c in &mut self.chunks {
@@ -818,6 +870,19 @@ impl Renderer {
         self.frame += 1;
         self.apply_textures(device, queue, &mut input.textures);
         self.needs_another_frame = false;
+        // Meshes finished in the background since the last frame.
+        while let Ok((generation, id, lod, mesh)) = self.workers.results.try_recv() {
+            self.workers.pending.remove(&(id, lod));
+            if generation != self.workers.generation || self.meshes.contains_key(&(id, lod)) {
+                continue;
+            }
+            if let Some((chunk, base_vertex, first_index)) = self.upload_mesh(device, queue, &mesh) {
+                self.meshes.insert((id, lod), CachedMesh { chunk, base_vertex, first_index, index_count: mesh.indices.len() as u32, last_used: self.frame });
+            }
+        }
+        if !self.workers.pending.is_empty() {
+            self.needs_another_frame = true;
+        }
         let vp = [size[0] as f64, size[1] as f64];
         let rot = input.rotation;
         let rs = |scale: f64| [(scale * rot[0]) as f32, (scale * rot[1]) as f32];
@@ -826,6 +891,7 @@ impl Renderer {
         let mut kinds: Vec<Kind> = Vec::with_capacity(input.visible.len() + 1);
         // Layer position of each draw.
         let mut draw_layers: Vec<u16> = Vec::with_capacity(input.visible.len() + 1);
+        let mut requests: Vec<(f64, StrokeId, u32)> = Vec::new();
         let mut draws: Vec<Draw> = Vec::with_capacity(input.visible.len() + 1);
         let mut dyn_v: Vec<[f32; 3]> = Vec::new();
         let mut dyn_i: Vec<u32> = Vec::new();
@@ -837,32 +903,35 @@ impl Renderer {
             let lod = lod_for(v.level, input.log_zoom);
             let (color, grain, kind) = self.paint(stroke);
             if rel <= GPU_MAX_REL {
-                let key = (v.id, lod);
-                let cached = match self.meshes.get_mut(&key) {
-                    Some(m) => {
-                        m.last_used = self.frame;
-                        Some(*m)
-                    }
-                    None if self.unlimited_budget || started.elapsed() < TESSELLATION_BUDGET => {
+                // Exact LOD, or a slightly finer one already cached.
+                let mut use_lod = (lod..=(lod + LOD_SLACK).min(MAX_LOD)).find(|l| self.meshes.contains_key(&(v.id, *l)));
+                if use_lod.is_none() {
+                    // Closest cached LOD, finer ones first: shown until the right one is ready.
+                    let fallback = (0..=MAX_LOD).filter(|l| self.meshes.contains_key(&(v.id, *l))).min_by_key(|l| (*l < lod, l.abs_diff(lod)));
+                    let sync = self.unlimited_budget
+                        || input.urgent.contains(&v.id)
+                        || (fallback.is_none() && stroke.points.len() <= SYNC_POINTS && started.elapsed() < TESSELLATION_BUDGET);
+                    if sync {
                         let mesh = tessellate(stroke, lod);
-                        self.upload_mesh(device, queue, &mesh).map(|(chunk, base_vertex, first_index)| {
-                            let m = CachedMesh {
-                                chunk,
-                                base_vertex,
-                                first_index,
-                                index_count: mesh.indices.len() as u32,
-                                last_used: self.frame,
-                            };
-                            self.meshes.insert(key, m);
-                            m
-                        })
-                    }
-                    None => {
-                        // Over budget: use any other LOD we already have, else draw it next frame.
+                        if let Some((chunk, base_vertex, first_index)) = self.upload_mesh(device, queue, &mesh) {
+                            let m = CachedMesh { chunk, base_vertex, first_index, index_count: mesh.indices.len() as u32, last_used: self.frame };
+                            self.meshes.insert((v.id, lod), m);
+                            use_lod = Some(lod);
+                        }
+                    } else {
+                        // In the background; meanwhile show whatever LOD there is.
+                        let b = stroke.cache.bbox;
+                        let area = ((b[2] - b[0]) as f64 * (b[3] - b[1]) as f64) * v.scale * v.scale;
+                        requests.push((area, v.id, lod));
                         self.needs_another_frame = true;
-                        (0..=canvas_core::mesh::MAX_LOD).rev().find_map(|l| self.meshes.get(&(v.id, l)).copied())
+                        use_lod = fallback;
                     }
-                };
+                }
+                let cached = use_lod.and_then(|l| {
+                    let m = self.meshes.get_mut(&(v.id, l))?;
+                    m.last_used = self.frame;
+                    Some(*m)
+                });
                 if let Some(m) = cached {
                     let instance = instances.len() as u32;
                     instances.push(Instance { offset: f32x2(v.offset), rs: rs(v.scale), color, params: grain });
@@ -907,6 +976,14 @@ impl Renderer {
                     });
                     // Indices were written relative to `base`.
                 }
+            }
+        }
+
+        // Background jobs, biggest on screen first (they matter most when zooming out).
+        requests.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, id, lod) in requests {
+            if let Some(stroke) = input.doc.get(id) {
+                self.workers.request(stroke, lod);
             }
         }
 

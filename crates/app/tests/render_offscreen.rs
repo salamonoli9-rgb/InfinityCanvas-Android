@@ -43,6 +43,17 @@ fn headless() -> Option<Headless> {
 }
 
 impl Headless {
+    /// Renders exactly one frame and returns RGBA pixels.
+    fn frame_once(&mut self, app: &mut CanvasApp) -> Vec<u8> {
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(W as f32, H as f32))),
+            ..Default::default()
+        };
+        let target = Target::View { device: &self.device, queue: &self.queue, format: FORMAT, size: [W, H], view: &self.view };
+        let _ = app.frame(target, &mut self.renderer, raw);
+        self.read()
+    }
+
     /// Renders a frame and returns RGBA pixels.
     fn frame(&mut self, app: &mut CanvasApp) -> Vec<u8> {
         // Render twice: the first frame may postpone meshes because of the time budget.
@@ -54,6 +65,10 @@ impl Headless {
             let target = Target::View { device: &self.device, queue: &self.queue, format: FORMAT, size: [W, H], view: &self.view };
             let _ = app.frame(target, &mut self.renderer, raw);
         }
+        self.read()
+    }
+
+    fn read(&mut self) -> Vec<u8> {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
             self.texture.as_image_copy(),
@@ -823,4 +838,75 @@ fn layers_erase_hide_opacity_and_order() {
     let (doc, _) = canvas_core::io::decode(&bytes).unwrap();
     assert_eq!(doc.layers.len(), 2);
     assert_eq!(doc.layers[0].id, top);
+}
+
+/// A busy, colourful photo drawing: many large fills to tessellate.
+fn busy_photo() -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(600, 300, |x, y| {
+        let v = ((x as f32 * 0.05).sin() * (y as f32 * 0.07).cos() * 0.5 + 0.5) * 120.0 + 120.0;
+        let w = (((x / 9 + y / 7) % 5) * 12) as f32;
+        image::Rgba([(v + w) as u8, (240.0 - w * 2.0) as u8, (v * 0.8) as u8, 255])
+    });
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    png
+}
+
+#[test]
+fn a_new_stroke_shows_immediately_even_when_busy() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    let opts = infinite_canvas::app::DrawingOptions { detail: 1.0, colored: true, outlines: false, keep_photo: false };
+    let n = app.photo_to_drawing(&busy_photo(), opts).unwrap();
+    assert!(n > 200, "{n}");
+    gpu.frame_once(&mut app); // lots of tessellation still in flight
+    app.tools.color = egui::Color32::BLACK;
+    app.tools.width = 6.0;
+    draw_line(&mut app, 230.0, 150.0, 650.0);
+    let px = gpu.frame_once(&mut app);
+    for x in [200, 400, 600] {
+        assert!(dark(&px, x, 230), "new line visible in the very first frame at x = {x}");
+    }
+}
+
+#[test]
+fn zooming_never_shows_holes() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 6.0;
+    // A grid of strokes covering the screen.
+    for i in 0..30 {
+        let y = 120.0 + i as f64 * 6.0;
+        draw_line(&mut app, y, 20.0, 740.0);
+    }
+    for _ in 0..5 {
+        gpu.frame(&mut app);
+    }
+    let covered = |px: &[u8]| (0..40).filter(|k| dark(px, 60 + k * 15, 200)).count();
+    assert_eq!(covered(&gpu.frame(&mut app)), 40);
+    // The first frame after a zoom must already show (nearly) everything the final,
+    // fully tessellated frame shows: no white holes while new LODs are being made.
+    let mut check = |app: &mut CanvasApp, what: &str| {
+        let first = gpu.frame_once(app);
+        let mut last = first.clone();
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            last = gpu.frame_once(app);
+        }
+        let ink = |px: &[u8]| -> Vec<bool> { (0..W * H).map(|i| (i / W) > 115 && dark(px, i % W, i / W)).collect() };
+        let (a, b) = (ink(&first), ink(&last));
+        let total = b.iter().filter(|v| **v).count();
+        let missing = a.iter().zip(&b).filter(|(x, y)| !**x && **y).count();
+        assert!(total > 1000 && missing * 100 <= total, "{what}: {missing} of {total} ink pixels missing in the first frame");
+    };
+    app.wheel_zoom([384.0, 200.0], -1.5);
+    check(&mut app, "zoom out");
+    app.wheel_zoom([384.0, 200.0], 4.0);
+    check(&mut app, "zoom in");
 }
