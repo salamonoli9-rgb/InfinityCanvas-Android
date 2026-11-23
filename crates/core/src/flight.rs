@@ -108,8 +108,8 @@ mod tests {
     #[test]
     fn rotation_takes_the_short_way() {
         let a = Camera::default();
-        let mut b = Camera::default();
-        b.rotation = -3.0; // ≈ -172°: from 0 the short way is through -90°
+        // ≈ -172°: from 0 the short way is through -90°.
+        let b = Camera { rotation: -3.0, ..Default::default() };
         let f = Flight::new(&a, &b, VP);
         let mid = f.at(f.duration * 0.5).rotation;
         assert!(mid < 0.0 && mid > -3.0, "{mid}");
