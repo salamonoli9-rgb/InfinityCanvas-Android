@@ -30,12 +30,12 @@ struct Desktop {
     ctrl: bool,
 }
 
-fn data_path() -> std::path::PathBuf {
+fn data_dir() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(|| ".".into());
-    base.join("infinite-canvas").join("canvas.icnv")
+    base.join("infinite-canvas")
 }
 
 impl Desktop {
@@ -212,11 +212,21 @@ impl ApplicationHandler for Desktop {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"))
         .init();
-    let path = std::env::args().nth(1).map(std::path::PathBuf::from).unwrap_or_else(data_path);
-    log::info!("drawing file: {}", path.display());
+    // A file argument opens that one drawing; otherwise the projects folder is used.
+    let app = match std::env::args().nth(1).map(std::path::PathBuf::from) {
+        Some(path) => {
+            log::info!("drawing file: {}", path.display());
+            CanvasApp::new(Some(path))
+        }
+        None => {
+            let dir = data_dir();
+            log::info!("data folder: {}", dir.display());
+            CanvasApp::with_projects(&dir)
+        }
+    };
     let event_loop = EventLoop::new().expect("cannot create event loop");
     let mut d = Desktop {
-        app: CanvasApp::new(Some(path)),
+        app,
         instance: wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
             event_loop.owned_display_handle(),
         ))),

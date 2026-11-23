@@ -7,7 +7,7 @@
 use crate::app::CanvasApp;
 use crate::gestures::{MouseButton, Phase, PointerEvent, PointerKind};
 use crate::render::{Gpu, Renderer, Target};
-use android_activity::input::{InputEvent, MotionAction, MotionEvent, ToolType};
+use android_activity::input::{InputEvent, KeyAction, KeyEvent, KeyMapChar, Keycode, MotionAction, MotionEvent, ToolType};
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent};
 use raw_window_handle::{AndroidDisplayHandle, HasWindowHandle, RawDisplayHandle};
 use std::time::{Duration, Instant};
@@ -28,6 +28,8 @@ struct State {
     size: [u32; 2],
     /// Pointer currently forwarded to egui (first finger / pen).
     egui_pointer: Option<u64>,
+    /// Whether the soft keyboard is shown (a text field has focus).
+    keyboard: bool,
 }
 
 fn kind(t: ToolType) -> PointerKind {
@@ -148,7 +150,7 @@ impl State {
         }
     }
 
-    fn frame(&mut self) {
+    fn frame(&mut self, app: &AndroidApp) {
         let Some(g) = self.gfx.as_mut() else { return };
         let ppp = self.canvas.pixels_per_point;
         let mut raw = egui::RawInput {
@@ -162,7 +164,68 @@ impl State {
             ..Default::default()
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
-        let _ = self.canvas.frame(Target::Surface(&g.gpu), &mut g.renderer, raw);
+        let out = self.canvas.frame(Target::Surface(&g.gpu), &mut g.renderer, raw);
+        let wants_keyboard = out.ime.is_some();
+        if wants_keyboard != self.keyboard {
+            self.keyboard = wants_keyboard;
+            if wants_keyboard {
+                app.show_soft_input(true);
+            } else {
+                app.hide_soft_input(false);
+            }
+        }
+    }
+
+    /// Key presses → egui (typing in text fields) and the system back button.
+    fn key(&mut self, app: &AndroidApp, k: &KeyEvent) -> InputStatus {
+        if k.action() != KeyAction::Down {
+            return if self.keyboard || k.key_code() == Keycode::Back { InputStatus::Handled } else { InputStatus::Unhandled };
+        }
+        let key = match k.key_code() {
+            Keycode::Back => {
+                // A visible keyboard eats the first "back" itself, so getting one here means
+                // it is already hidden: drop the text focus and close the window in one go.
+                if self.keyboard {
+                    self.keyboard = false;
+                    app.hide_soft_input(false);
+                    self.egui_events.push(egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Default::default(),
+                    });
+                }
+                return if self.canvas.back() { InputStatus::Handled } else { InputStatus::Unhandled };
+            }
+            Keycode::Del => Some(egui::Key::Backspace),
+            Keycode::ForwardDel => Some(egui::Key::Delete),
+            Keycode::Enter | Keycode::NumpadEnter => Some(egui::Key::Enter),
+            Keycode::DpadLeft => Some(egui::Key::ArrowLeft),
+            Keycode::DpadRight => Some(egui::Key::ArrowRight),
+            Keycode::MoveHome => Some(egui::Key::Home),
+            Keycode::MoveEnd => Some(egui::Key::End),
+            _ => None,
+        };
+        if !self.keyboard {
+            return InputStatus::Unhandled;
+        }
+        if let Some(key) = key {
+            for pressed in [true, false] {
+                self.egui_events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
+            }
+        } else if let Ok(map) = app.device_key_character_map(k.device_id())
+            && let Ok(KeyMapChar::Unicode(c)) = map.get(k.key_code(), k.meta_state())
+        {
+            self.egui_events.push(egui::Event::Text(c.to_string()));
+        }
+        InputStatus::Handled
     }
 }
 
@@ -172,10 +235,13 @@ fn android_main(app: AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("infinite_canvas"),
     );
     std::panic::set_hook(Box::new(|info| log::error!("PANIC: {info}")));
-    let path = app.internal_data_path().map(|p| p.join("canvas.icnv"));
-    log::info!("drawing file: {path:?}");
+    let data_dir = app.internal_data_path();
+    log::info!("data folder: {data_dir:?}");
     let density = app.config().density().unwrap_or(160) as f32 / 160.0;
-    let mut canvas = CanvasApp::new(path);
+    let mut canvas = match &data_dir {
+        Some(d) => CanvasApp::with_projects(d),
+        None => CanvasApp::new(None),
+    };
     canvas.pixels_per_point = density.max(1.0);
     let mut s = State {
         canvas,
@@ -185,6 +251,7 @@ fn android_main(app: AndroidApp) {
         start: Instant::now(),
         size: [1, 1],
         egui_pointer: None,
+        keyboard: false,
     };
     let mut quit = false;
     while !quit {
@@ -226,6 +293,11 @@ fn android_main(app: AndroidApp) {
                         s.motion(m);
                         InputStatus::Handled
                     }
+                    InputEvent::KeyEvent(k) => {
+                        let st = s.key(&app, k);
+                        s.canvas.wants_redraw = true;
+                        st
+                    }
                     _ => InputStatus::Unhandled,
                 });
                 if !more {
@@ -234,10 +306,10 @@ fn android_main(app: AndroidApp) {
             }
         }
         if s.gfx.is_some() && (s.canvas.animating() || !s.egui_events.is_empty()) {
-            s.frame();
+            s.frame(&app);
         } else if s.gfx.is_some() && s.canvas.next_wakeup() == Some(Duration::ZERO) {
             // Lets the app run its autosave even when idle.
-            s.frame();
+            s.frame(&app);
         }
     }
     s.canvas.save_now();

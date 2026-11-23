@@ -74,7 +74,8 @@ pub fn tessellate(stroke: &Stroke, lod: u32) -> Mesh {
         let opts = StrokeOptions::tolerance(tolerance)
             .with_line_width(stroke.width.max(0.05))
             .with_variable_line_width(0)
-            .with_line_cap(LineCap::Round)
+            .with_start_cap(if stroke.flat_caps[0] { LineCap::Butt } else { LineCap::Round })
+            .with_end_cap(if stroke.flat_caps[1] { LineCap::Butt } else { LineCap::Round })
             .with_line_join(LineJoin::Round);
         let mut tess = StrokeTessellator::new();
         let mut bb = BuffersBuilder::new(&mut out, |v: StrokeVertex| v.position().to_array());

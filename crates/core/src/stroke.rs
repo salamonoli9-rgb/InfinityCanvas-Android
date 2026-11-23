@@ -29,6 +29,8 @@ pub struct Stroke {
     pub width: f32,
     /// Draw order (lower = further back). Pieces left by the eraser keep their parent's order.
     pub order: u64,
+    /// Flat (butt) end at the start / end instead of a round cap: set where the eraser cut.
+    pub flat_caps: [bool; 2],
     #[serde(skip)]
     pub cache: StrokeCache,
 }
@@ -48,7 +50,7 @@ pub fn pressure_factor(p: f32) -> f32 {
 
 impl Stroke {
     pub fn new(id: StrokeId, level: i32, anchor: [BigInt; 2], color: [u8; 4], width: f32) -> Self {
-        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, cache: StrokeCache::default() };
+        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, flat_caps: [false; 2], cache: StrokeCache::default() };
         s.refresh_cache();
         s
     }
@@ -87,20 +89,19 @@ impl Stroke {
         }
     }
 
-    /// Erases the part of the stroke touched by a circle of radius `r` at local point `c`.
+    /// Erases the part of the stroke under a circle of radius `r` at local point `c`.
     ///
-    /// A point counts as erased when the circle overlaps the ink there (distance to the centre
-    /// line ≤ `r` + local brush radius), so the round caps of the remaining pieces end tangent
-    /// to the eraser. Crossings are located exactly on each segment, not just at samples.
-    /// Returns `None` if nothing was touched, otherwise the remaining pieces (possibly none).
-    pub fn erase_circle(&self, c: [f64; 2], r: f64) -> Option<Vec<Vec<StrokePoint>>> {
+    /// The centre line is cut where it enters the circle grown by half the local brush radius,
+    /// and the new ends get flat caps (see [`Stroke::flat_caps`]): the cut edge then runs close
+    /// to the eraser's edge like a real eraser, even for thick strokes. Crossings are located
+    /// exactly on each segment, not just at samples.
+    /// Returns `None` if nothing changed, otherwise the remaining pieces (possibly none) with
+    /// their `flat_caps`.
+    pub fn erase_circle(&self, c: [f64; 2], r: f64) -> Option<Vec<(Vec<StrokePoint>, [bool; 2])>> {
         if !self.hit_circle(c, r) {
             return None;
         }
         let pts = &self.points;
-        if pts.len() == 1 {
-            return Some(Vec::new());
-        }
         let lerp = |a: &StrokePoint, b: &StrokePoint, t: f64| StrokePoint {
             x: (a.x as f64 + (b.x - a.x) as f64 * t) as f32,
             y: (a.y as f64 + (b.y - a.y) as f64 * t) as f32,
@@ -108,7 +109,10 @@ impl Stroke {
         };
         // Signed: < 0 inside the erased zone. Convex along a segment (distance to a point
         // minus a linear radius), so each segment has at most two crossings.
-        let f = |p: &StrokePoint| ((c[0] - p.x as f64).powi(2) + (c[1] - p.y as f64).powi(2)).sqrt() - r - self.radius_at(p) as f64;
+        let f = |p: &StrokePoint| ((c[0] - p.x as f64).powi(2) + (c[1] - p.y as f64).powi(2)).sqrt() - r - 0.5 * self.radius_at(p) as f64;
+        if pts.len() == 1 {
+            return (f(&pts[0]) < 0.0).then(Vec::new);
+        }
         let bisect = |a: &StrokePoint, b: &StrokePoint, mut lo: f64, mut hi: f64| {
             let inside_lo = f(&lerp(a, b, lo)) < 0.0;
             for _ in 0..30 {
@@ -121,10 +125,14 @@ impl Stroke {
             }
             0.5 * (lo + hi)
         };
-        let mut pieces: Vec<Vec<StrokePoint>> = Vec::new();
+        let mut pieces: Vec<(Vec<StrokePoint>, [bool; 2])> = Vec::new();
         let mut cur: Vec<StrokePoint> = Vec::new();
+        let mut cur_start_flat = self.flat_caps[0];
+        let mut touched = false;
         if f(&pts[0]) >= 0.0 {
             cur.push(pts[0]);
+        } else {
+            touched = true;
         }
         for w in pts.windows(2) {
             let (a, b) = (&w[0], &w[1]);
@@ -140,21 +148,24 @@ impl Stroke {
             if fc != fb {
                 cross.push((bisect(a, b, tc, 1.0), !fc));
             }
+            touched |= fc || fb;
             for (t, entering) in cross {
-                let p = lerp(a, b, t);
+                cur.push(lerp(a, b, t));
                 if entering {
-                    cur.push(p);
-                    pieces.push(std::mem::take(&mut cur));
+                    pieces.push((std::mem::take(&mut cur), [cur_start_flat, true]));
                 } else {
-                    cur.push(p);
+                    cur_start_flat = true;
                 }
             }
             if !fb {
                 cur.push(*b);
             }
         }
-        pieces.push(cur);
-        pieces.retain(|p| p.len() >= 2);
+        if !touched {
+            return None;
+        }
+        pieces.push((cur, [cur_start_flat, self.flat_caps[1]]));
+        pieces.retain(|(p, _)| p.len() >= 2);
         Some(pieces)
     }
 
@@ -215,23 +226,35 @@ mod tests {
         let s = line(2);
         let pieces = s.erase_circle([50.0, 1.0], 8.0).unwrap();
         assert_eq!(pieces.len(), 2);
-        // Zone half-width along the line: sqrt((8+2)^2 - 1^2) ≈ 9.95.
-        let cut = (10.0f32 * 10.0 - 1.0).sqrt();
-        let end0 = pieces[0].last().unwrap().x;
-        let start1 = pieces[1][0].x;
+        // Zone half-width along the line: sqrt((8 + 2/2)^2 - 1^2).
+        let cut = (9.0f32 * 9.0 - 1.0).sqrt();
+        let end0 = pieces[0].0.last().unwrap().x;
+        let start1 = pieces[1].0[0].x;
         assert!((end0 - (50.0 - cut)).abs() < 1e-3, "{end0}");
         assert!((start1 - (50.0 + cut)).abs() < 1e-3, "{start1}");
-        assert_eq!(pieces[0][0].x, 0.0);
-        assert_eq!(pieces[1].last().unwrap().x, 100.0);
+        assert_eq!(pieces[0].0[0].x, 0.0);
+        assert_eq!(pieces[1].0.last().unwrap().x, 100.0);
+        // Only the cut ends are flat.
+        assert_eq!(pieces[0].1, [false, true]);
+        assert_eq!(pieces[1].1, [true, false]);
+        // Cutting a piece again keeps its existing flat end.
+        let mut p1 = Stroke::new(2, 0, s.anchor.clone(), s.color, s.width);
+        p1.points = pieces[1].0.clone();
+        p1.flat_caps = pieces[1].1;
+        p1.refresh_cache();
+        let again = p1.erase_circle([80.0, 0.0], 3.0).unwrap();
+        assert_eq!(again.iter().map(|p| p.1).collect::<Vec<_>>(), vec![[true, true], [true, false]]);
     }
 
     #[test]
     fn erase_end_trims_and_miss_is_none() {
         let s = line(10);
         assert!(s.erase_circle([50.0, 30.0], 5.0).is_none());
+        // Touching only the edge of the ink leaves the stroke alone.
+        assert!(s.erase_circle([50.0, 11.5], 10.0).is_none());
         let pieces = s.erase_circle([100.0, 0.0], 10.0).unwrap();
         assert_eq!(pieces.len(), 1);
-        assert!((pieces[0].last().unwrap().x - 88.0).abs() < 1e-3);
+        assert!((pieces[0].0.last().unwrap().x - 89.0).abs() < 1e-3);
         let all = s.erase_circle([50.0, 0.0], 80.0).unwrap();
         assert!(all.is_empty());
     }

@@ -10,7 +10,8 @@ use canvas_core::io;
 use canvas_core::smoothing::PointerSmoother;
 use canvas_core::stroke::{Stroke, StrokeId, StrokePoint};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::PathBuf;
+use crate::projects::Projects;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const BACKGROUND: [f32; 4] = [0.98, 0.976, 0.965, 1.0];
@@ -72,6 +73,13 @@ pub struct CanvasApp {
     /// Height (points) covered by the status bar / notch at the top.
     pub safe_top: f32,
     stats: FrameStats,
+    projects: Option<Projects>,
+    /// Name of the open project (empty in single-file mode).
+    pub project: String,
+    menu: ui::MenuState,
+    save_thread: Option<std::thread::JoinHandle<()>>,
+    /// Set when a different document was loaded: cached meshes are keyed by stroke id.
+    clear_render_cache: bool,
 }
 
 /// Frame-time statistics, logged every two seconds while frames are being drawn.
@@ -158,8 +166,161 @@ impl CanvasApp {
             wants_redraw: true,
             safe_top: 0.0,
             stats: FrameStats::default(),
+            projects: None,
+            project: String::new(),
+            menu: ui::MenuState::default(),
+            save_thread: None,
+            clear_render_cache: false,
         }
         .with_touch_style()
+    }
+
+    /// Opens the projects folder in `data_dir` and the last used project (or a new one).
+    pub fn with_projects(data_dir: &Path) -> Self {
+        let projects = match Projects::new(data_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("cannot open the projects folder: {e}");
+                return Self::new(Some(data_dir.join("canvas.icnv")));
+            }
+        };
+        let name = projects
+            .last()
+            .or_else(|| projects.list().first().map(|p| p.name.clone()))
+            .unwrap_or_else(|| projects.new_name());
+        projects.set_last(&name);
+        let mut app = Self::new(Some(projects.path_for(&name)));
+        if !projects.exists(&name) {
+            // Create the file so the project is listed even before anything is drawn.
+            app.dirty = true;
+            app.save_now();
+        }
+        log::info!("project {name:?}");
+        app.project = name;
+        app.projects = Some(projects);
+        app
+    }
+
+    /// Replaces the open document with the file at `path` (empty if it doesn't exist).
+    fn load_document(&mut self, path: PathBuf) {
+        self.save_now();
+        let (doc, camera) = match io::load_file(&path) {
+            Ok(dc) => dc,
+            Err(io::LoadError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (Document::new(), Camera::default()),
+            Err(e) => {
+                log::error!("could not load {}: {e}", path.display());
+                let _ = std::fs::rename(&path, path.with_extension("broken"));
+                self.menu.message = Some(format!("Plik był uszkodzony: {e}"));
+                (Document::new(), Camera::default())
+            }
+        };
+        self.doc = doc;
+        self.camera = camera;
+        self.history = History::default();
+        self.active = None;
+        self.erasing = None;
+        self.inertia = Inertia::default();
+        self.save_path = Some(path);
+        self.dirty = false;
+        self.clear_render_cache = true;
+        self.wants_redraw = true;
+    }
+
+    fn switch_project(&mut self, name: String) {
+        let Some(path) = self.projects.as_ref().map(|p| p.path_for(&name)) else { return };
+        self.load_document(path);
+        if let Some(p) = &self.projects {
+            p.set_last(&name);
+        }
+        self.project = name;
+    }
+
+    fn refresh_menu(&mut self) {
+        if let Some(p) = &self.projects {
+            self.menu.list = p.list();
+        }
+        self.menu.name_edit = self.project.clone();
+    }
+
+    fn menu_action(&mut self, a: ui::MenuAction) {
+        use ui::MenuAction::*;
+        let Some(projects) = self.projects.clone() else { return };
+        match a {
+            New => {
+                self.save_now();
+                let name = projects.new_name();
+                self.switch_project(name.clone());
+                // Write the empty file right away so the project shows up in the list.
+                self.dirty = true;
+                self.save_now();
+                self.menu.message = Some(format!("Nowa kartka „{name}”"));
+                self.menu.open = false;
+            }
+            Open(name) => {
+                self.switch_project(name);
+                self.menu.message = None;
+                self.menu.open = false;
+            }
+            Rename(to) => {
+                self.save_now();
+                match projects.rename(&self.project, &to) {
+                    Ok(name) => {
+                        self.save_path = Some(projects.path_for(&name));
+                        projects.set_last(&name);
+                        self.menu.message = Some(format!("Zmieniono nazwę na „{name}”"));
+                        self.project = name;
+                    }
+                    Err(e) => self.menu.message = Some(e),
+                }
+            }
+            Duplicate => {
+                self.dirty = true;
+                self.save_now();
+                let res = projects.duplicate(&self.project);
+                self.menu.message = Some(match res {
+                    Ok(copy) => format!("Utworzono kopię „{copy}”"),
+                    Err(e) => format!("Nie udało się skopiować: {e}"),
+                });
+            }
+            Delete(name) => {
+                if name == self.project {
+                    self.wait_for_save();
+                    self.dirty = false;
+                }
+                if let Err(e) = projects.delete(&name) {
+                    self.menu.message = Some(format!("Nie udało się usunąć: {e}"));
+                } else {
+                    self.menu.message = Some(format!("Usunięto „{name}”"));
+                    if name == self.project {
+                        let next = projects.list().first().map(|p| p.name.clone()).unwrap_or_else(|| projects.new_name());
+                        self.dirty = false;
+                        self.switch_project(next);
+                    }
+                }
+            }
+            Save => {
+                self.dirty = true;
+                self.save_now();
+                self.menu.message = Some("Zapisano".into());
+            }
+        }
+        self.refresh_menu();
+    }
+
+    /// System "back": closes the projects window. Returns whether it was handled.
+    pub fn back(&mut self) -> bool {
+        if self.menu.open {
+            self.menu.open = false;
+            self.wants_redraw = true;
+            return true;
+        }
+        false
+    }
+
+    fn wait_for_save(&mut self) {
+        if let Some(t) = self.save_thread.take() {
+            let _ = t.join();
+        }
     }
 
     /// Starts a fresh egui context. Needed when the GPU renderer is recreated (Android
@@ -331,9 +492,10 @@ impl CanvasApp {
             if !er.added.remove(&id) {
                 er.removed.insert(id, s.clone());
             }
-            for points in pieces {
+            for (points, flat_caps) in pieces {
                 let mut piece = Stroke::new(self.doc.alloc_id(), s.level, s.anchor.clone(), s.color, s.width);
                 piece.order = s.order;
+                piece.flat_caps = flat_caps;
                 piece.points = points;
                 piece.refresh_cache();
                 er.added.insert(piece.id);
@@ -383,6 +545,7 @@ impl CanvasApp {
 
     /// Saves now if there are unsaved changes (call on pause / exit).
     pub fn save_now(&mut self) {
+        self.wait_for_save();
         let Some(path) = self.save_path.clone() else { return };
         if !self.dirty {
             return;
@@ -402,7 +565,8 @@ impl CanvasApp {
             // Encoding is fast; the disk write happens off the UI thread.
             let bytes = io::encode(&self.doc, &self.camera);
             self.dirty = false;
-            std::thread::spawn(move || {
+            self.wait_for_save();
+            self.save_thread = Some(std::thread::spawn(move || {
                 let tmp = path.with_extension("tmp");
                 let res = (|| -> std::io::Result<()> {
                     if let Some(d) = path.parent() {
@@ -417,7 +581,7 @@ impl CanvasApp {
                 if let Err(e) = res {
                     log::error!("autosave failed: {e}");
                 }
-            });
+            }));
         }
     }
 
@@ -462,10 +626,25 @@ impl CanvasApp {
             strokes: self.doc.len(),
         };
         let mut actions = ui::Actions::default();
+        let mut menu_actions = Vec::new();
         let mut rects = Vec::new();
         let ctx = self.egui_ctx.clone();
         let output = ctx.run_ui(raw_input, |ui| {
-            let (a, r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
+            let (a, mut r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
+            if a.menu {
+                self.menu.open = !self.menu.open;
+                self.menu.message = None;
+                self.menu.confirm_delete = None;
+                if let Some(p) = &self.projects {
+                    self.menu.list = p.list();
+                }
+                self.menu.name_edit = self.project.clone();
+            }
+            menu_actions = ui::projects_window(ui.ctx(), &mut self.menu, &self.project, self.safe_top);
+            if self.menu.open {
+                // The canvas is inert while the projects window is open.
+                r.push(egui::Rect::EVERYTHING);
+            }
             actions = a;
             rects = r;
             if let Some(er) = &self.erasing {
@@ -486,6 +665,12 @@ impl CanvasApp {
         }
         if actions.home {
             self.go_home();
+        }
+        for a in menu_actions {
+            self.menu_action(a);
+        }
+        if std::mem::take(&mut self.clear_render_cache) {
+            renderer.clear_cache();
         }
         self.autosave();
 
@@ -515,5 +700,68 @@ impl CanvasApp {
         let egui_repaint = output.viewport_output.values().any(|v| v.repaint_delay.is_zero());
         self.wants_redraw |= renderer.needs_another_frame || egui_repaint || self.inertia.active();
         output.platform_output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gestures::{MouseButton, Phase};
+    use crate::ui::MenuAction;
+
+    fn draw(app: &mut CanvasApp, y: f64) {
+        let ev = |phase, x: f64, t: f64| PointerEvent {
+            id: 0,
+            kind: PointerKind::Mouse,
+            phase,
+            pos: [x, y],
+            pressure: 1.0,
+            time: t,
+            button: MouseButton::Primary,
+        };
+        app.pointer(ev(Phase::Down, 100.0, 0.0));
+        for i in 1..20 {
+            app.pointer(ev(Phase::Move, 100.0 + i as f64 * 5.0, i as f64 / 100.0));
+        }
+        app.pointer(ev(Phase::Up, 200.0, 0.3));
+    }
+
+    #[test]
+    fn project_workflow() {
+        let dir = std::env::temp_dir().join(format!("icnv-app-projects-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = CanvasApp::with_projects(&dir);
+        app.resize([800, 600]);
+        assert_eq!(app.project, "Rysunek 1");
+        draw(&mut app, 300.0);
+        assert_eq!(app.doc.len(), 1);
+
+        app.menu_action(MenuAction::New);
+        assert_eq!(app.project, "Rysunek 2");
+        assert!(app.doc.is_empty() && !app.history.can_undo());
+        draw(&mut app, 100.0);
+        draw(&mut app, 200.0);
+
+        app.menu_action(MenuAction::Open("Rysunek 1".into()));
+        assert_eq!(app.doc.len(), 1);
+        app.menu_action(MenuAction::Rename("Szkice".into()));
+        assert_eq!(app.project, "Szkice");
+        app.menu_action(MenuAction::Duplicate);
+        let names: Vec<String> = app.menu.list.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.contains(&"Szkice (kopia)".to_string()));
+
+        // Deleting the open project switches to another one.
+        app.menu_action(MenuAction::Delete("Szkice".into()));
+        assert_ne!(app.project, "Szkice");
+        assert_eq!(app.menu.list.len(), 2);
+
+        // Reopening the app comes back to the last project, with its strokes.
+        app.menu_action(MenuAction::Open("Rysunek 2".into()));
+        app.save_now();
+        let again = CanvasApp::with_projects(&dir);
+        assert_eq!(again.project, "Rysunek 2");
+        assert_eq!(again.doc.len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -42,8 +42,8 @@ Skrypt domyślnie szuka SDK w `~/Android/Sdk` (można nadpisać zmienną `ANDROI
 ## Desktop
 
 ```bash
-cargo run --release                 # rysunek w ~/.local/share/infinite-canvas/canvas.icnv
-cargo run --release -- inny.icnv    # inny plik
+cargo run --release                 # projekty w ~/.local/share/infinite-canvas/projects/
+cargo run --release -- inny.icnv    # otwiera jeden konkretny plik
 ```
 
 | Akcja | Sterowanie |
@@ -77,16 +77,25 @@ Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
 |---|---|
 | rysowanie | rysik albo jeden palec |
 | przesuwanie + zoom | dwa palce (szczypanie wokół środka gestu), z bezwładnością po puszczeniu |
-| gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika |
+| gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika – ściera tylko to, przez co przejdzie (kreska jest przecinana) |
 | palm rejection | po pierwszym użyciu rysika palce już nie rysują – jeden palec przesuwa płótno |
 
 Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy dołoży się drugi palec
 (start szczypania).
 
+## Projekty
+
+Przycisk **Menu** otwiera okno projektów: nowa kartka, otwieranie zapisanych projektów, zmiana
+nazwy bieżącego, duplikowanie, usuwanie (z potwierdzeniem) i ręczne „Zapisz”. Każdy projekt to
+osobny plik `Nazwa.icnv` w folderze `projects/` (desktop: `~/.local/share/infinite-canvas/`,
+Android: pamięć wewnętrzna aplikacji). Po uruchomieniu otwiera się ostatnio używany projekt.
+Na Androidzie przycisk „Wstecz” zamyka okno projektów.
+
 ## Zapis
 
 Rysunek zapisuje się automatycznie ~1,5 s po każdej zmianie oraz przy wyjściu/wstrzymaniu
-aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16), dane w `postcard`. Zapis jest
+aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 3; starsze wersje nadal się
+wczytują), dane w `postcard`. Zapis jest
 atomowy (plik tymczasowy + rename). Uszkodzony plik nie jest nadpisywany – zostaje przemianowany
 na `*.broken`.
 

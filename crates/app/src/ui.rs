@@ -1,5 +1,6 @@
 //! Minimal floating toolbar (egui). Kept small and at the top edge so it never covers much.
 
+use crate::projects::{self, ProjectInfo};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,7 +14,7 @@ pub struct ToolState {
     pub color: Color32,
     /// Pen width in logical points (screen size at drawing time).
     pub width: f32,
-    /// Eraser radius in logical points.
+    /// Eraser diameter in logical points.
     pub eraser: f32,
     pub palette: Vec<Color32>,
 }
@@ -52,6 +53,7 @@ pub struct Actions {
     pub undo: bool,
     pub redo: bool,
     pub home: bool,
+    pub menu: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -97,21 +99,26 @@ fn colors(ui: &mut egui::Ui, s: &mut ToolState) {
     }
 }
 
-fn size_slider(ui: &mut egui::Ui, s: &mut ToolState) {
-    match s.tool {
-        Tool::Pen => {
-            ui.add(egui::Slider::new(&mut s.width, 0.5..=64.0).logarithmic(true).max_decimals(1).text("grubość"));
-        }
-        Tool::Eraser => {
-            ui.add(egui::Slider::new(&mut s.eraser, 2.0..=80.0).logarithmic(true).max_decimals(0).text("rozmiar"));
-        }
-    }
+fn size_slider(ui: &mut egui::Ui, s: &mut ToolState, label: bool) {
+    let (value, range, decimals, text) = match s.tool {
+        Tool::Pen => (&mut s.width, 0.5..=64.0, 1, "grubość"),
+        Tool::Eraser => (&mut s.eraser, 4.0..=160.0, 0, "rozmiar"),
+    };
+    let slider = egui::Slider::new(value, range).logarithmic(true).max_decimals(decimals);
+    ui.add(if label { slider.text(text) } else { slider }).on_hover_text(text);
 }
 
 fn history_buttons(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
     a.undo |= ui.add_enabled(info.can_undo, egui::Button::new("Cofnij")).clicked();
     a.redo |= ui.add_enabled(info.can_redo, egui::Button::new("Ponów")).clicked();
+}
+
+fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
     a.home |= ui.button("Początek").on_hover_text("Wróć do początku (Home)").clicked();
+}
+
+fn menu_button(ui: &mut egui::Ui, a: &mut Actions) {
+    a.menu |= ui.button("Menu").on_hover_text("Projekty: nowa kartka, otwórz, zmień nazwę").clicked();
 }
 
 fn zoom_label(ui: &mut egui::Ui, info: &Info) {
@@ -157,25 +164,31 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
             ui.set_max_width(inner_w);
             if compact {
                 ui.horizontal(|ui| {
+                    menu_button(ui, &mut a);
+                    ui.separator();
                     tool_buttons(ui, s);
                     ui.separator();
                     history_buttons(ui, info, &mut a);
                 });
                 ui.horizontal_wrapped(|ui| colors(ui, s));
                 ui.horizontal(|ui| {
-                    size_slider(ui, s);
+                    size_slider(ui, s, false);
                     ui.separator();
+                    home_button(ui, &mut a);
                     zoom_label(ui, info);
                 });
             } else {
                 ui.horizontal(|ui| {
+                    menu_button(ui, &mut a);
+                    ui.separator();
                     tool_buttons(ui, s);
                     ui.separator();
                     colors(ui, s);
                     ui.separator();
-                    size_slider(ui, s);
+                    size_slider(ui, s, true);
                     ui.separator();
                     history_buttons(ui, info, &mut a);
+                    home_button(ui, &mut a);
                     ui.separator();
                     zoom_label(ui, info);
                 });
@@ -188,6 +201,118 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
         rects.push(Rect::EVERYTHING);
     }
     (a, rects)
+}
+
+/// State of the projects window.
+#[derive(Default)]
+pub struct MenuState {
+    pub open: bool,
+    /// Text in the "name" field (rename of the current project).
+    pub name_edit: String,
+    /// Project waiting for a delete confirmation.
+    pub confirm_delete: Option<String>,
+    /// Feedback line (errors, "zapisano").
+    pub message: Option<String>,
+    pub list: Vec<ProjectInfo>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum MenuAction {
+    New,
+    Open(String),
+    Rename(String),
+    Duplicate,
+    Delete(String),
+    Save,
+}
+
+/// The projects window. Returns the chosen actions; the caller applies them.
+pub fn projects_window(ctx: &egui::Context, st: &mut MenuState, current: &str, safe_top: f32) -> Vec<MenuAction> {
+    let mut out = Vec::new();
+    if !st.open {
+        return out;
+    }
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 16.0).min(440.0);
+    let max_h = (screen.height() - safe_top - 24.0).max(200.0);
+    let mut open = true;
+    egui::Window::new("Projekty")
+        .id(egui::Id::unique("projects"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top])
+        .fixed_size([width, 0.0])
+        .max_height(max_h)
+        .show(ctx, |ui| {
+            ui.set_width(width - 16.0);
+            ui.label(egui::RichText::new("Bieżąca kartka").small().weak());
+            ui.horizontal(|ui| {
+                let field = egui::TextEdit::singleline(&mut st.name_edit).desired_width(ui.available_width() - 110.0);
+                let r = ui.add(field);
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let changed = st.name_edit.trim() != current;
+                if (ui.add_enabled(changed, egui::Button::new("Zmień nazwę")).clicked() || (enter && changed))
+                    && !st.name_edit.trim().is_empty()
+                {
+                    out.push(MenuAction::Rename(st.name_edit.clone()));
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Nowa kartka").clicked() {
+                    out.push(MenuAction::New);
+                }
+                if ui.button("Duplikuj").clicked() {
+                    out.push(MenuAction::Duplicate);
+                }
+                if ui.button("Zapisz").on_hover_text("Rysunek zapisuje się też sam").clicked() {
+                    out.push(MenuAction::Save);
+                }
+            });
+            if let Some(m) = &st.message {
+                ui.label(egui::RichText::new(m).italics());
+            }
+            ui.separator();
+            ui.label(egui::RichText::new("Zapisane projekty").small().weak());
+            egui::ScrollArea::vertical().max_height((max_h - 220.0).max(120.0)).show(ui, |ui| {
+                for p in &st.list {
+                    let is_current = p.name == current;
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            let name = egui::RichText::new(&p.name);
+                            ui.label(if is_current { name.strong() } else { name });
+                            ui.label(egui::RichText::new(projects::ago(p.modified)).small().weak());
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if st.confirm_delete.as_deref() == Some(p.name.as_str()) {
+                                if ui.button("Nie").clicked() {
+                                    st.confirm_delete = None;
+                                }
+                                if ui.button(egui::RichText::new("Usuń na zawsze").color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
+                                    out.push(MenuAction::Delete(p.name.clone()));
+                                    st.confirm_delete = None;
+                                }
+                            } else {
+                                if ui.button("Usuń").clicked() {
+                                    st.confirm_delete = Some(p.name.clone());
+                                }
+                                if is_current {
+                                    ui.label(egui::RichText::new("otwarty").small().weak());
+                                } else if ui.button("Otwórz").clicked() {
+                                    out.push(MenuAction::Open(p.name.clone()));
+                                }
+                            }
+                        });
+                    });
+                    ui.separator();
+                }
+            });
+        });
+    if !open {
+        st.open = false;
+        st.confirm_delete = None;
+    }
+    out
 }
 
 #[cfg(test)]

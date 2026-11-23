@@ -189,9 +189,9 @@ fn eraser_and_undo() {
     assert_eq!(app.doc.len(), 2);
     let px = gpu.frame(&mut app);
     assert!(!dark(&px, 200, 150));
-    // Gap = eraser circle: the round caps end tangent to it (radius 12).
-    assert!(!dark(&px, 209, 150) && !dark(&px, 191, 150));
-    assert!(dark(&px, 216, 150));
+    // Flat cut ends just outside the eraser circle: radius 12 + half the brush radius (2.5).
+    assert!(!dark(&px, 212, 150) && !dark(&px, 188, 150));
+    assert!(dark(&px, 217, 150) && dark(&px, 183, 150));
     assert!(dark(&px, 225, 150) && dark(&px, 175, 150) && dark(&px, 120, 150) && dark(&px, 280, 150));
 
     // A vertical swipe across the right piece: one gesture, one undo step.
