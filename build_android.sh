@@ -4,6 +4,7 @@
 #   ./build_android.sh            release build + install
 #   ./build_android.sh --debug    faster debug build + install
 #   ./build_android.sh --no-install
+#   ./build_android.sh --no-start  install, but don't bring the app to the front
 #
 # Needs: Android SDK (build-tools, platform android-36, NDK), cargo-ndk, Rust target
 # aarch64-linux-android, Java runtime (for apksigner/keytool). No Gradle, no JDK:
@@ -13,10 +14,12 @@ cd "$(dirname "$0")"
 
 PROFILE=release
 INSTALL=1
+START=1
 for a in "$@"; do
     case "$a" in
         --debug) PROFILE=debug ;;
         --no-install) INSTALL=0 ;;
+        --no-start) START=0 ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -79,6 +82,8 @@ if [[ $INSTALL == 1 ]]; then
     fi
     echo "==> adb install"
     "$ADB" install -r "$APK"
-    "$ADB" shell am start -n dev.infinitecanvas.app/android.app.NativeActivity >/dev/null
-    echo "==> started. Logs: $ADB logcat -s infinite_canvas:V"
+    if [[ $START == 1 ]]; then
+        "$ADB" shell am start -n dev.infinitecanvas.app/android.app.NativeActivity >/dev/null
+        echo "==> started. Logs: $ADB logcat -s infinite_canvas:V"
+    fi
 fi
