@@ -48,6 +48,8 @@ struct ActiveStroke {
     /// Smoothed pointer speed (points per second), for the dynamic pen.
     speed: f64,
     last_sample: Option<([f64; 2], f64)>,
+    /// Shape guide being dragged, with its start point (screen px).
+    shape: Option<(crate::shapes::Shape, [f64; 2])>,
 }
 
 /// While drawing, every this many points are tessellated once and kept, so each frame only
@@ -1023,8 +1025,20 @@ impl CanvasApp {
                 self.eraser_cursor = None;
                 if let Some(a) = self.active.take() {
                     let mut s = a.stroke;
+                    if a.shape.is_some() {
+                        // Shapes dragged by less than a few pixels are dropped (accidental taps).
+                        let f = self.camera.level_frame(s.level, self.viewport);
+                        let bb = s.cache.bbox;
+                        let r = s.width as f64;
+                        if ((bb[2] - bb[0]) as f64 - r).max((bb[3] - bb[1]) as f64 - r) * f.scale < 4.0 * self.pixels_per_point as f64 {
+                            return;
+                        }
+                        if s.brush == Brush::Fill && s.points.len() <= 2 {
+                            s.brush = Brush::Pen; // a "filled line" is just a line
+                        }
+                    }
                     // A tap with the fill brush = bucket fill of the enclosed area there.
-                    if s.brush == Brush::Fill && !s.is_eraser() {
+                    if s.brush == Brush::Fill && !s.is_eraser() && a.shape.is_none() {
                         let f = self.camera.level_frame(s.level, self.viewport);
                         let len: f32 = s.points.windows(2).map(|w| ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt()).sum();
                         if (len as f64) * f.scale < 12.0 * self.pixels_per_point as f64 {
@@ -1097,12 +1111,26 @@ impl CanvasApp {
             frozen_upto: 0,
             speed: 0.0,
             last_sample: None,
+            shape: if eraser { None } else { self.tools.shape.map(|sh| (sh, pos)) },
         });
         self.extend_stroke(pos, pressure, time, kind);
     }
 
     fn extend_stroke(&mut self, pos: [f64; 2], pressure: f32, time: f64, kind: PointerKind) {
         let Some(a) = self.active.as_mut() else { return };
+        if let Some((shape, start)) = a.shape {
+            // A shape is rebuilt from its start to the pointer on every move.
+            let frame = self.camera.level_frame(a.stroke.level, self.viewport);
+            a.stroke.points = crate::shapes::points(shape, start, pos)
+                .into_iter()
+                .map(|p| {
+                    let l = frame.screen_to_local(p, &a.stroke.anchor, a.stroke.cache.anchor_fast);
+                    StrokePoint { x: l[0] as f32, y: l[1] as f32, pressure: 1.0 }
+                })
+                .collect();
+            a.stroke.refresh_cache();
+            return;
+        }
         // The eraser always has its full size.
         let pressure = if a.stroke.is_eraser() { 1.0 } else { Self::pressure(kind, pressure) };
         let (x, y, mut p) = a.smoother.push(pos[0], pos[1], pressure as f64, time);

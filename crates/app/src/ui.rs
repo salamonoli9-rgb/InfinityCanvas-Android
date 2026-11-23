@@ -1,6 +1,7 @@
 //! Minimal floating toolbar (egui). Kept small and at the top edge so it never covers much.
 
 use crate::projects::{self, ProjectInfo, Projects};
+use crate::shapes::Shape;
 use canvas_core::stroke::Brush;
 use std::collections::HashMap;
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
@@ -14,6 +15,8 @@ pub enum Tool {
 pub struct ToolState {
     pub tool: Tool,
     pub brush: Brush,
+    /// Draw a straight line / rectangle / ellipse instead of freehand.
+    pub shape: Option<Shape>,
     pub color: Color32,
     /// Width of the current brush in logical points (screen size at drawing time).
     pub width: f32,
@@ -38,7 +41,7 @@ impl ToolState {
 }
 
 /// Short brush label for the toolbar (the menu shows full names).
-fn short_name(b: Brush) -> &'static str {
+pub fn short_name(b: Brush) -> &'static str {
     match b {
         Brush::Pen => "Pióro",
         Brush::Fountain => "Wieczne",
@@ -57,6 +60,7 @@ impl Default for ToolState {
         Self {
             tool: Tool::Pen,
             brush: Brush::Pen,
+            shape: None,
             widths: HashMap::new(),
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
@@ -128,7 +132,8 @@ fn swatch(ui: &mut egui::Ui, color: Color32, selected: bool) -> egui::Response {
 /// Draws the toolbar; returns actions and the screen rects (in points) the UI covers.
 /// Brush button (opens the list of brushes) and the eraser.
 fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
-    let button = egui::Button::new(short_name(s.brush)).selected(s.tool == Tool::Pen);
+    let label = s.shape.map_or(short_name(s.brush), Shape::name);
+    let button = egui::Button::new(label).selected(s.tool == Tool::Pen);
     let r = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
         ui.set_min_width(170.0);
         for b in Brush::ALL {
@@ -137,6 +142,22 @@ fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
                 ui.close();
             }
         }
+        ui.separator();
+        ui.label(egui::RichText::new("Kształt (aktualnym pędzlem)").small().weak());
+        ui.horizontal_wrapped(|ui| {
+            if ui.add(egui::Button::new("Odręcznie").selected(s.shape.is_none())).clicked() {
+                s.shape = None;
+                s.tool = Tool::Pen;
+                ui.close();
+            }
+            for sh in Shape::ALL {
+                if ui.add(egui::Button::new(sh.name()).selected(s.shape == Some(sh))).clicked() {
+                    s.shape = Some(sh);
+                    s.tool = Tool::Pen;
+                    ui.close();
+                }
+            }
+        });
     });
     r.0.on_hover_text("Pędzel");
     ui.selectable_value(&mut s.tool, Tool::Eraser, "Gumka");
@@ -865,9 +886,11 @@ mod layout_tests {
         });
         let info = Info { can_undo: true, can_redo: false, log_zoom: -33.4, rotation: -2.5, strokes: 2 };
         let mut rect = Rect::NOTHING;
-        for brush in Brush::ALL {
+        let shapes = [None, Some(Shape::Line), Some(Shape::Rectangle), Some(Shape::Ellipse)];
+        for (brush, shape) in Brush::ALL.iter().flat_map(|b| shapes.iter().map(move |sh| (*b, *sh))) {
             let mut s = ToolState::default();
             s.set_brush(brush);
+            s.shape = shape;
             for _ in 0..4 {
                 let raw = egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),

@@ -91,6 +91,10 @@ Przycisk z nazwą pędzla na pasku otwiera listę. Każdy pędzel pamięta włas
 | Kropkowana | kropki co ~2 grubości |
 | Wypełnienie | **stuknięcie** = wiadro z farbą: wypełnia obszar zamknięty kreskami (omija wyspy w środku); **przeciągnięcie** = rysuje wypełniony kształt |
 
+W tym samym menu jest **Kształt**: Odręcznie / Linia / Prostokąt / Elipsa – przeciągnięcie od
+rogu do rogu rysuje kształt aktualnym pędzlem (z „Wypełnieniem” – wypełniony). Linia przyciąga się
+do wielokrotności 45°, prawie-kwadrat do kwadratu, prawie-koło do koła.
+
 Wszystkie pędzle są wektorowe (ziarno ołówka liczone w shaderze we współrzędnych kreski), więc
 nie tracą ostrości przy zoomie. Kreska półprzezroczysta nie ciemnieje tam, gdzie nachodzi sama
 na siebie (bufor stencil).

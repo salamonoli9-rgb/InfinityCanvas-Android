@@ -6,6 +6,7 @@ pub mod gestures;
 pub mod photos;
 pub mod projects;
 pub mod render;
+pub mod shapes;
 pub mod ui;
 
 #[cfg(not(target_os = "android"))]

@@ -737,3 +737,37 @@ fn bookmark_flight_returns_to_the_exact_view() {
     assert_eq!(app.camera.rotation, 0.0);
     assert!(dark(&after, 400, 200) && dark(&after, 310, 200) && !dark(&after, 400, 230), "back at the saved view");
 }
+
+#[test]
+fn shape_guides() {
+    use canvas_core::stroke::Brush;
+    use infinite_canvas::shapes::Shape;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 4.0;
+    let drag = |app: &mut CanvasApp, a: [f64; 2], b: [f64; 2], t: f64| {
+        mouse(app, Phase::Down, a, t);
+        for k in 1..=10 {
+            let f = k as f64 / 10.0;
+            mouse(app, Phase::Move, [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], t + k as f64 * 0.01);
+        }
+        mouse(app, Phase::Up, b, t + 0.2);
+    };
+    app.tools.shape = Some(Shape::Rectangle);
+    drag(&mut app, [100.0, 130.0], [300.0, 280.0], 0.0);
+    // An ellipse with the fill brush (near-square drag → circle of radius 70 around (520, 205)).
+    app.tools.set_brush(Brush::Fill);
+    app.tools.shape = Some(Shape::Ellipse);
+    drag(&mut app, [450.0, 135.0], [590.0, 273.0], 1.0);
+    // A tiny accidental drag adds nothing.
+    drag(&mut app, [700.0, 200.0], [701.0, 200.0], 2.0);
+    assert_eq!(app.doc.len(), 2);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 100, 130) && dark(&px, 300, 280) && dark(&px, 200, 130) && dark(&px, 300, 200), "rectangle edges and sharp corners");
+    assert!(!dark(&px, 200, 200), "rectangle is not filled");
+    assert!(dark(&px, 520, 205) && dark(&px, 520, 140) && dark(&px, 455, 205), "filled circle");
+    assert!(!dark(&px, 460, 145), "circle, not a square");
+}
