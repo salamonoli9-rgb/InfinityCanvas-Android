@@ -5,6 +5,8 @@
 #   ./build_android.sh --debug    faster debug build + install
 #   ./build_android.sh --no-install
 #   ./build_android.sh --no-start  install, but don't bring the app to the front
+#   ./build_android.sh --to-files  also copy the APK to the phone's Download folder
+#                                  (Files app → Downloads → Nieskonczone-plotno.apk)
 #
 # Needs: Android SDK (build-tools, platform android-36, NDK), cargo-ndk, Rust target
 # aarch64-linux-android, Java runtime (for apksigner/keytool). No Gradle, no JDK:
@@ -15,11 +17,13 @@ cd "$(dirname "$0")"
 PROFILE=release
 INSTALL=1
 START=1
+TO_FILES=0
 for a in "$@"; do
     case "$a" in
         --debug) PROFILE=debug ;;
         --no-install) INSTALL=0 ;;
         --no-start) START=0 ;;
+        --to-files) TO_FILES=1 ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -86,4 +90,11 @@ if [[ $INSTALL == 1 ]]; then
         "$ADB" shell am start -n dev.infinitecanvas.app/android.app.NativeActivity >/dev/null
         echo "==> started. Logs: $ADB logcat -s infinite_canvas:V"
     fi
+fi
+
+if [[ $TO_FILES == 1 ]]; then
+    "$ADB" push "$APK" /sdcard/Download/Nieskonczone-plotno.apk >/dev/null
+    "$ADB" shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+        -d file:///sdcard/Download/Nieskonczone-plotno.apk >/dev/null 2>&1 || true
+    echo "==> copied to the phone: Download/Nieskonczone-plotno.apk"
 fi

@@ -72,6 +72,7 @@ cargo run --release -- inny.icnv    # otwiera jeden konkretny plik
 ./build_android.sh              # release, instaluje i uruchamia
 ./build_android.sh --debug      # szybsza kompilacja
 ./build_android.sh --no-install # tylko target/android/infinite-canvas.apk
+./build_android.sh --to-files   # dodatkowo kopia APK w telefonie: Pobrane/Nieskonczone-plotno.apk
 ```
 
 Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
