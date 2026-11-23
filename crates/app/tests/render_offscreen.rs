@@ -448,3 +448,50 @@ fn pencil_dotted_and_fill() {
     assert!(!dark(&px, 730, 200), "outside of the fill");
 }
 
+
+#[test]
+fn reference_photo_under_strokes() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    // A pure red 400×200 photo, placed centred (fits 80% of 768×300 → 480×240 at (144, 30)).
+    let img = image::RgbaImage::from_pixel(400, 200, image::Rgba([255, 0, 0, 255]));
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    app.add_photo(&png).unwrap();
+    assert!(app.image_edit.is_some(), "a new photo starts in move mode");
+    // Moving it with the "finger" moves the photo, not the view.
+    mouse(&mut app, Phase::Down, [400.0, 200.0], 0.0);
+    mouse(&mut app, Phase::Move, [450.0, 200.0], 0.1);
+    mouse(&mut app, Phase::Up, [450.0, 200.0], 0.2);
+    assert!(app.back(), "back finishes moving");
+    assert!(app.image_edit.is_none());
+    let px = gpu.frame(&mut app);
+    let at = |x: u32, y: u32| { let i = ((y * W + x) * 4) as usize; [px[i], px[i + 1], px[i + 2]] };
+    // Opacity 0.5 over the light background: pinkish red. Right of the old right edge (624)
+    // because it was moved 50 px; left of the new left edge (194) there is no photo.
+    let c = at(650, 250);
+    assert!(c[0] > 200 && c[1] > 90 && c[1] < 160, "half-transparent red: {c:?}");
+    assert!(at(170, 250)[1] > 230, "background left of the moved photo");
+
+    // Ink goes on top; the eraser removes ink but not the photo.
+    draw_line(&mut app, 250.0, 300.0, 500.0);
+    assert!(dark(&gpu.frame(&mut app), 400, 250));
+    app.tools.tool = infinite_canvas::ui::Tool::Eraser;
+    app.tools.eraser = 40.0;
+    mouse(&mut app, Phase::Down, [400.0, 250.0], 5.0);
+    mouse(&mut app, Phase::Up, [400.0, 250.0], 5.1);
+    let px2 = gpu.frame(&mut app);
+    let i = ((250 * W + 400) * 4) as usize;
+    let c2 = [px2[i], px2[i + 1], px2[i + 2]];
+    assert!(c2[0] > 200 && c2[1] > 90 && c2[1] < 160, "photo still under the erased spot: {c2:?}");
+
+    // Undo removes the move, then the photo.
+    app.undo(); // eraser
+    app.undo(); // line
+    app.undo(); // move
+    app.undo(); // photo
+    assert_eq!(app.doc.images().count(), 0);
+}

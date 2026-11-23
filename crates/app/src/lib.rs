@@ -13,3 +13,5 @@ pub mod desktop;
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "android")]
+mod android_photos;

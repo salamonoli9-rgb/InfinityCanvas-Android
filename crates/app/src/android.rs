@@ -243,6 +243,11 @@ fn android_main(app: AndroidApp) {
         None => CanvasApp::new(None),
     };
     canvas.pixels_per_point = density.max(1.0);
+    // SAFETY: pointers come straight from android-activity and live as long as the process.
+    match unsafe { crate::android_photos::MediaStorePhotos::new(app.vm_as_ptr(), app.activity_as_ptr()) } {
+        Some(b) => canvas.set_photo_backend(Box::new(b)),
+        None => log::warn!("photo library unavailable"),
+    }
     let mut s = State {
         canvas,
         instance: wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env()),

@@ -439,19 +439,21 @@ fn picker(ui: &mut egui::Ui, st: &mut PhotoPanel, lib: Option<&mut crate::photos
 }
 
 /// Bar shown while a photo is being moved: what the fingers do, and "done".
-pub fn image_edit_bar(ctx: &egui::Context) -> bool {
+pub fn image_edit_bar(ctx: &egui::Context) -> (bool, Rect) {
     let mut done = false;
-    egui::Area::new(egui::Id::unique("image-edit"))
+    let r = egui::Area::new(egui::Id::unique("image-edit"))
         .anchor(Align2::CENTER_BOTTOM, [0.0, -24.0])
         .show(ctx, |ui| {
+            let max_w = (ui.ctx().content_rect().width() - 48.0).max(160.0);
             egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.set_max_width(max_w);
+                ui.vertical_centered(|ui| {
                     ui.label("Przesuń zdjęcie palcem, dwoma palcami skaluj i obracaj");
-                    done = ui.button("Gotowe").clicked();
+                    done = ui.button("    Gotowe    ").clicked();
                 });
             });
         });
-    done
+    (done, r.response.rect)
 }
 
 /// State of the projects gallery (start screen).
@@ -657,5 +659,17 @@ mod layout_tests {
         }
         assert!(rect.min.x >= 0.0 && rect.max.x <= 360.0, "{rect:?}");
         assert!(rect.min.y >= 24.0, "{rect:?}");
+
+        // The photo edit bar fits too.
+        let mut bar = Rect::NOTHING;
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| bar = image_edit_bar(ui.ctx()).1);
+            out.textures_delta.clear();
+        }
+        assert!(bar.min.x >= 0.0 && bar.max.x <= 360.0 && bar.max.y <= 800.0, "{bar:?}");
     }
 }

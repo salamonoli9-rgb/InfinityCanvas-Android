@@ -489,7 +489,7 @@ impl CanvasApp {
         let img = RefImage::place(self.doc.alloc_id(), &self.camera, self.viewport, pixels, Arc::new(p.encoded), 0.8);
         let id = img.id;
         self.decoded.insert(id, Arc::new(p.rgba));
-        self.history.apply(&mut self.doc, Action::Image { before: None, after: Some(img) });
+        self.history.apply(&mut self.doc, Action::Image { before: None, after: Some(Box::new(img)) });
         self.image_edit = Some(ImageEdit { id, before: None, last: None });
         self.changed();
         Ok(id)
@@ -532,7 +532,7 @@ impl CanvasApp {
         let Some(before) = e.before.take() else { return };
         let after = self.doc.image(e.id).cloned();
         if after.as_ref() != Some(&before) {
-            self.history.record(Action::Image { before: Some(before), after });
+            self.history.record(Action::Image { before: Some(Box::new(before)), after: after.map(Box::new) });
             self.changed();
         }
     }
@@ -616,13 +616,13 @@ impl CanvasApp {
                 if let Some(img) = self.doc.image(id).cloned() {
                     let mut after = img.clone();
                     after.visible = !after.visible;
-                    self.history.apply(&mut self.doc, Action::Image { before: Some(img), after: Some(after) });
+                    self.history.apply(&mut self.doc, Action::Image { before: Some(Box::new(img)), after: Some(Box::new(after)) });
                     self.changed();
                 }
             }
             Delete(id) => {
                 if let Some(img) = self.doc.image(id).cloned() {
-                    self.history.apply(&mut self.doc, Action::Image { before: Some(img), after: None });
+                    self.history.apply(&mut self.doc, Action::Image { before: Some(Box::new(img)), after: None });
                     if self.image_edit.as_ref().is_some_and(|e| e.id == id) {
                         self.image_edit = None;
                     }
@@ -938,7 +938,7 @@ impl CanvasApp {
             if self.photo_panel.open {
                 r.push(egui::Rect::EVERYTHING);
             }
-            if self.image_edit.is_some() && ui::image_edit_bar(ui.ctx()) {
+            if self.image_edit.is_some() && ui::image_edit_bar(ui.ctx()).0 {
                 finish_edit = true;
             }
             if ui.ctx().is_pointer_over_egui() {

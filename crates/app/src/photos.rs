@@ -118,8 +118,18 @@ impl PhotoLibrary {
                         Response::Read(k, b)
                     }
                     Request::Access => {
+                        // The system dialog's answer isn't delivered to native code: poll
+                        // until access is granted (or give up after a minute).
                         backend.request_access();
-                        continue;
+                        let mut result = backend.list();
+                        for _ in 0..120 {
+                            if result.is_ok() {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            result = backend.list();
+                        }
+                        Response::List(result)
                     }
                 };
                 if worker_tx.send(resp).is_err() {
@@ -150,6 +160,7 @@ impl PhotoLibrary {
     }
 
     pub fn request_access(&mut self) {
+        self.listing = true;
         let _ = self.tx.send(Request::Access);
     }
 
@@ -218,7 +229,7 @@ impl PhotoBackend for FolderPhotos {
         if found.is_empty() {
             return Err("Brak zdjęć w folderach Obrazy / Pictures / Pobrane. Możesz też przeciągnąć plik na okno.".into());
         }
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|f| std::cmp::Reverse(f.0));
         found.truncate(300);
         Ok(found
             .into_iter()

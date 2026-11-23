@@ -11,7 +11,7 @@ pub enum Action {
     /// Strokes replaced by others (e.g. cut by the eraser).
     Replace { removed: Vec<Stroke>, added: Vec<Stroke> },
     /// A reference image added (`before` = None), removed (`after` = None) or changed.
-    Image { before: Option<RefImage>, after: Option<RefImage> },
+    Image { before: Option<Box<RefImage>>, after: Option<Box<RefImage>> },
 }
 
 impl Action {
@@ -32,7 +32,7 @@ impl Action {
                     doc.remove_image(b.id);
                 }
                 if let Some(a) = after {
-                    doc.insert_image(a.clone());
+                    doc.insert_image((**a).clone());
                 }
             }
         }
