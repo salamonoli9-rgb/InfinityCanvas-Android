@@ -23,7 +23,7 @@ pub struct Stroke {
     /// Integer anchor in level units (world = anchor · 2^-level).
     pub anchor: [BigInt; 2],
     pub points: Vec<StrokePoint>,
-    /// RGBA, sRGB, straight alpha.
+    /// RGBA, sRGB, straight alpha. Alpha 0 = eraser stroke (see [`Stroke::is_eraser`]).
     pub color: [u8; 4],
     /// Full width at pressure 1, in level units.
     pub width: f32,
@@ -53,6 +53,13 @@ impl Stroke {
         let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, flat_caps: [false; 2], cache: StrokeCache::default() };
         s.refresh_cache();
         s
+    }
+
+    /// Colour with zero alpha marks an eraser stroke: it clears earlier ink under it.
+    pub const ERASER_COLOR: [u8; 4] = [0, 0, 0, 0];
+
+    pub fn is_eraser(&self) -> bool {
+        self.color[3] == 0
     }
 
     pub fn radius_at(&self, p: &StrokePoint) -> f32 {

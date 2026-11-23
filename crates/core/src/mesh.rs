@@ -38,10 +38,18 @@ fn segments(len: f32, lod: u32) -> usize {
 }
 
 pub fn tessellate(stroke: &Stroke, lod: u32) -> Mesh {
+    tessellate_part(stroke, 0..stroke.points.len(), lod)
+}
+
+/// Tessellates the points `range` of a stroke only (a stroke being drawn is built from
+/// frozen parts plus a live tail, so long strokes don't get slower to draw). Interior part
+/// ends get round caps; flat caps apply only at the stroke's real ends.
+pub fn tessellate_part(stroke: &Stroke, range: std::ops::Range<usize>, lod: u32) -> Mesh {
     let mut lod = lod.min(MAX_LOD);
+    let caps = [stroke.flat_caps[0] && range.start == 0, stroke.flat_caps[1] && range.end == stroke.points.len()];
     // Raw input is very dense (a sample every ~0.4 px); drop points that don't change the
     // shape by more than a fraction of a pixel at this LOD. Saves most of the geometry.
-    let pts = simplify(&dedup(&stroke.points), SIMPLIFY_TOLERANCE / (1u32 << lod) as f32);
+    let pts = simplify(&dedup(&stroke.points[range]), SIMPLIFY_TOLERANCE / (1u32 << lod) as f32);
     // Lower the LOD if this would produce absurd amounts of geometry.
     while lod > 0 {
         let est: usize = pts
@@ -74,8 +82,8 @@ pub fn tessellate(stroke: &Stroke, lod: u32) -> Mesh {
         let opts = StrokeOptions::tolerance(tolerance)
             .with_line_width(stroke.width.max(0.05))
             .with_variable_line_width(0)
-            .with_start_cap(if stroke.flat_caps[0] { LineCap::Butt } else { LineCap::Round })
-            .with_end_cap(if stroke.flat_caps[1] { LineCap::Butt } else { LineCap::Round })
+            .with_start_cap(if caps[0] { LineCap::Butt } else { LineCap::Round })
+            .with_end_cap(if caps[1] { LineCap::Butt } else { LineCap::Round })
             .with_line_join(LineJoin::Round);
         let mut tess = StrokeTessellator::new();
         let mut bb = BuffersBuilder::new(&mut out, |v: StrokeVertex| v.position().to_array());

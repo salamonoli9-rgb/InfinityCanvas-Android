@@ -6,7 +6,7 @@
 //! on the CPU and clipped to a guard band before being uploaded (see [`push_cpu_path`]).
 
 use canvas_core::document::VisibleStroke;
-use canvas_core::mesh::{Mesh, lod_for, tessellate};
+use canvas_core::mesh::{Mesh, lod_for, tessellate, tessellate_part};
 use canvas_core::stroke::{Stroke, StrokeId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -140,6 +140,8 @@ pub struct Timings {
     pub submit: f64,
     pub present: f64,
     pub triangles: usize,
+    /// Part of `build` spent on the stroke being drawn.
+    pub active: f64,
 }
 
 /// Where a frame goes.
@@ -164,12 +166,22 @@ impl Target<'_> {
     }
 }
 
+/// The stroke in progress: already tessellated parts plus the points after them.
+pub struct ActiveDraw<'a> {
+    pub stroke: &'a Stroke,
+    pub offset: [f64; 2],
+    pub scale: f64,
+    pub frozen: &'a [Mesh],
+    /// First point of the live tail (the last frozen part ends here too).
+    pub tail_from: usize,
+}
+
 /// What the app wants drawn this frame.
 pub struct FrameInput<'a> {
     pub visible: &'a [VisibleStroke],
     pub doc: &'a canvas_core::document::Document,
     /// Stroke being drawn right now (not in the document yet) with its transform.
-    pub active: Option<(&'a Stroke, [f64; 2], f64)>,
+    pub active: Option<ActiveDraw<'a>>,
     pub log_zoom: f64,
     /// (cos, sin) of the view rotation.
     pub rotation: [f64; 2],
@@ -179,12 +191,32 @@ pub struct FrameInput<'a> {
     pub textures: egui::TexturesDelta,
 }
 
+/// Per-size render targets: strokes are drawn with MSAA into a transparent layer (so the
+/// eraser can clear pixels), which is then put over the background on the screen.
+struct Targets {
+    size: [u32; 2],
+    msaa: wgpu::TextureView,
+    layer: wgpu::TextureView,
+    composite: wgpu::BindGroup,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Opaque,
+    Blend,
+    Erase,
+}
+
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     pipeline_opaque: wgpu::RenderPipeline,
+    /// Eraser strokes: clear what is under them in the stroke layer.
+    pipeline_erase: wgpu::RenderPipeline,
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    msaa_view: Option<(wgpu::TextureView, [u32; 2])>,
+    targets: Option<Targets>,
     chunks: Vec<Chunk>,
     meshes: HashMap<(StrokeId, u32), CachedMesh>,
     cpu_meshes: HashMap<(StrokeId, u32), (Arc<Mesh>, u64)>,
@@ -280,11 +312,63 @@ impl Renderer {
         });
         let pipeline = make_pipeline("stroke", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
         let pipeline_opaque = make_pipeline("stroke opaque", None);
-        let egui = egui_wgpu::Renderer::new(
-            device,
-            format,
-            egui_wgpu::RendererOptions { msaa_samples: MSAA, ..Default::default() },
-        );
+        // dst = dst · (1 − coverage): an eraser of alpha 1 removes everything under it.
+        let erase = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let pipeline_erase = make_pipeline("stroke erase", Some(wgpu::BlendState { color: erase, alpha: erase }));
+
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
+        });
+        let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let composite_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite pl"),
+            bind_group_layouts: &[Some(&composite_bgl)],
+            ..Default::default()
+        });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite"),
+            layout: Some(&composite_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        // egui is drawn in the (single-sampled) screen pass; it antialiases by itself.
+        let egui = egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions { msaa_samples: 1, ..Default::default() });
         let mk = |label, size, usage| {
             device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false })
         };
@@ -293,9 +377,12 @@ impl Renderer {
         Self {
             pipeline,
             pipeline_opaque,
+            pipeline_erase,
+            composite_pipeline,
+            composite_bgl,
             uniform_buf,
             bind_group,
-            msaa_view: None,
+            targets: None,
             chunks: Vec::new(),
             meshes: HashMap::new(),
             cpu_meshes: HashMap::new(),
@@ -322,6 +409,15 @@ impl Renderer {
         let a = c[3] as f32 / 255.0;
         // Premultiplied alpha.
         [conv(c[0]) * a, conv(c[1]) * a, conv(c[2]) * a, a]
+    }
+
+    /// Instance colour and how to draw it. Erasers draw with alpha 1 and clear the layer.
+    fn paint(&self, s: &Stroke) -> ([f32; 4], Kind) {
+        if s.is_eraser() {
+            return ([0.0, 0.0, 0.0, 1.0], Kind::Erase);
+        }
+        let c = self.color(s.color);
+        (c, if c[3] >= 1.0 { Kind::Opaque } else { Kind::Blend })
     }
 
     fn upload_mesh(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &Mesh) -> Option<(usize, i32, u32)> {
@@ -442,10 +538,10 @@ impl Renderer {
         });
         let view = texture.create_view(&Default::default());
         self.unlimited_budget = true;
-        // The main MSAA target is sized for the window; keep it for the next frame.
-        let msaa = self.msaa_view.take();
+        // The main targets are sized for the window; keep them for the next frame.
+        let window_targets = self.targets.take();
         self.render_to(device, queue, format, size, &view, input);
-        self.msaa_view = msaa;
+        self.targets = window_targets;
         self.unlimited_budget = false;
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -523,6 +619,7 @@ impl Renderer {
         let rs = |scale: f64| [(scale * rot[0]) as f32, (scale * rot[1]) as f32];
 
         let mut instances: Vec<Instance> = Vec::with_capacity(input.visible.len() + 1);
+        let mut kinds: Vec<Kind> = Vec::with_capacity(input.visible.len() + 1);
         let mut draws: Vec<Draw> = Vec::with_capacity(input.visible.len() + 1);
         let mut dyn_v: Vec<[f32; 2]> = Vec::new();
         let mut dyn_i: Vec<u32> = Vec::new();
@@ -532,7 +629,7 @@ impl Renderer {
             let Some(stroke) = input.doc.get(v.id) else { continue };
             let rel = input.log_zoom - v.level as f64;
             let lod = lod_for(v.level, input.log_zoom);
-            let color = self.color(stroke.color);
+            let (color, kind) = self.paint(stroke);
             if rel <= GPU_MAX_REL {
                 let key = (v.id, lod);
                 let cached = match self.meshes.get_mut(&key) {
@@ -563,6 +660,7 @@ impl Renderer {
                 if let Some(m) = cached {
                     let instance = instances.len() as u32;
                     instances.push(Instance { offset: f32x2(v.offset), rs: rs(v.scale), color });
+                    kinds.push(kind);
                     draws.push(Draw::Cached {
                         chunk: m.chunk,
                         base_vertex: m.base_vertex,
@@ -590,6 +688,7 @@ impl Renderer {
                 if dyn_i.len() > first {
                     let instance = instances.len() as u32;
                     instances.push(Instance { offset: [0.0, 0.0], rs: [1.0, 0.0], color });
+                    kinds.push(kind);
                     draws.push(Draw::Dynamic {
                         base_vertex: base as i32,
                         first_index: first as u32,
@@ -601,25 +700,32 @@ impl Renderer {
             }
         }
 
-        if let Some((stroke, offset, scale)) = input.active {
-            let lod = lod_for(stroke.level, input.log_zoom).min(2);
-            let mesh = tessellate(stroke, lod);
-            if !mesh.is_empty() {
-                let base = dyn_v.len();
-                let first = dyn_i.len();
+        let t_active = Instant::now();
+        if let Some(a) = input.active {
+            let lod = lod_for(a.stroke.level, input.log_zoom).min(2);
+            let tail = tessellate_part(a.stroke, a.tail_from.min(a.stroke.points.len().saturating_sub(1))..a.stroke.points.len(), lod);
+            let base = dyn_v.len();
+            let first = dyn_i.len();
+            for mesh in a.frozen.iter().chain(std::iter::once(&tail)) {
+                let b = (dyn_v.len() - base) as u32;
                 dyn_v.extend_from_slice(&mesh.vertices);
-                dyn_i.extend_from_slice(&mesh.indices);
+                dyn_i.extend(mesh.indices.iter().map(|i| i + b));
+            }
+            if dyn_i.len() > first {
+                let (color, kind) = self.paint(a.stroke);
                 let instance = instances.len() as u32;
-                instances.push(Instance { offset: f32x2(offset), rs: rs(scale), color: self.color(stroke.color) });
+                instances.push(Instance { offset: f32x2(a.offset), rs: rs(a.scale), color });
+                kinds.push(kind);
                 draws.push(Draw::Dynamic {
                     base_vertex: base as i32,
                     first_index: first as u32,
-                    count: mesh.indices.len() as u32,
+                    count: (dyn_i.len() - first) as u32,
                     instance,
                 });
             }
         }
 
+        self.timings.active = t_active.elapsed().as_secs_f64();
         // Upload per-frame data, growing buffers when needed.
         let grow = |buf: &mut wgpu::Buffer, cap: &mut u64, need: u64, elem: u64, usage, label| {
             if need > *cap {
@@ -650,20 +756,31 @@ impl Renderer {
             bytemuck::bytes_of(&Uniforms { viewport: [size[0] as f32, size[1] as f32], _pad: [0.0; 2] }),
         );
 
-        // MSAA target.
-        if self.msaa_view.as_ref().map(|(_, s)| *s != size).unwrap_or(true) {
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("msaa"),
-                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: MSAA,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
+        if self.targets.as_ref().is_none_or(|t| t.size != size) {
+            let mk = |label, samples, usage| {
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some(label),
+                        size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: samples,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default())
+            };
+            let msaa = mk("msaa", MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
+            let layer = mk("layer", 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("composite"),
+                layout: &self.composite_bgl,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&layer) }],
             });
-            self.msaa_view = Some((tex.create_view(&Default::default()), size));
+            self.targets = Some(Targets { size, msaa, layer, composite });
         }
+        let targets = self.targets.as_ref().expect("just created");
 
         self.timings.build = started.elapsed().as_secs_f64();
         self.timings.triangles = draws
@@ -684,22 +801,17 @@ impl Renderer {
             egui_cmds = self.egui.update_buffers(device, queue, &mut encoder, prims, &screen);
         }
 
+        // 1. Strokes into the transparent layer (MSAA, resolved into `layer`).
         {
-            let bg = input.background;
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("main"),
+                    label: Some("strokes"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: if MSAA > 1 { &self.msaa_view.as_ref().unwrap().0 } else { view },
+                        view: if MSAA > 1 { &targets.msaa } else { &targets.layer },
                         depth_slice: None,
-                        resolve_target: if MSAA > 1 { Some(view) } else { None },
+                        resolve_target: if MSAA > 1 { Some(&targets.layer) } else { None },
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: bg[0] as f64,
-                                g: bg[1] as f64,
-                                b: bg[2] as f64,
-                                a: bg[3] as f64,
-                            }),
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: if MSAA > 1 { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
                         },
                     })],
@@ -709,13 +821,17 @@ impl Renderer {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(1, self.instance_buf.slice(..));
             let mut bound: Option<usize> = None; // usize::MAX = dynamic buffers
-            let mut opaque_bound: Option<bool> = None;
+            let mut kind_bound: Option<Kind> = None;
             for d in &draws {
                 let (Draw::Cached { instance, .. } | Draw::Dynamic { instance, .. }) = *d;
-                let opaque = instances[instance as usize].color[3] >= 1.0;
-                if opaque_bound != Some(opaque) {
-                    pass.set_pipeline(if opaque { &self.pipeline_opaque } else { &self.pipeline });
-                    opaque_bound = Some(opaque);
+                let kind = kinds[instance as usize];
+                if kind_bound != Some(kind) {
+                    pass.set_pipeline(match kind {
+                        Kind::Opaque => &self.pipeline_opaque,
+                        Kind::Blend => &self.pipeline,
+                        Kind::Erase => &self.pipeline_erase,
+                    });
+                    kind_bound = Some(kind);
                 }
                 match *d {
                     Draw::Cached { chunk, base_vertex, first_index, count, instance } => {
@@ -736,6 +852,33 @@ impl Renderer {
                     }
                 }
             }
+        }
+        // 2. Background, the layer on top, then the UI.
+        {
+            let bg = input.background;
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("screen"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: bg[0] as f64,
+                                g: bg[1] as f64,
+                                b: bg[2] as f64,
+                                a: bg[3] as f64,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                })
+                .forget_lifetime();
+            pass.set_pipeline(&self.composite_pipeline);
+            pass.set_bind_group(0, &targets.composite, &[]);
+            pass.draw(0..3, 0..1);
             if let Some((prims, _)) = input.egui {
                 self.egui.render(&mut pass, prims, &screen);
             }

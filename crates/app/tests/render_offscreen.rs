@@ -177,42 +177,45 @@ fn eraser_and_undo() {
         return;
     };
     let mut app = new_app();
-    draw_line(&mut app, 150.0, 100.0, 300.0);
+    draw_line(&mut app, 150.0, 100.0, 300.0); // 10 px thick, y 145..155
     app.tools.tool = infinite_canvas::ui::Tool::Eraser;
     app.tools.eraser = 24.0;
-    draw_line(&mut app, 100.0, 200.0, 200.5); // touches nothing
-    assert_eq!(app.doc.len(), 1);
 
-    // A tap cuts a gap; both ends stay.
+    // A tap erases a round hole of radius 12: exactly the eraser's shape, not a band.
     mouse(&mut app, Phase::Down, [200.0, 150.0], 2.0);
     mouse(&mut app, Phase::Up, [200.0, 150.0], 2.1);
-    assert_eq!(app.doc.len(), 2);
+    assert_eq!(app.doc.len(), 2, "the eraser is a stroke of its own");
     let px = gpu.frame(&mut app);
-    assert!(!dark(&px, 200, 150));
-    // Flat cut ends just outside the eraser circle: radius 12 + half the brush radius (2.5).
-    assert!(!dark(&px, 212, 150) && !dark(&px, 188, 150));
-    assert!(dark(&px, 217, 150) && dark(&px, 183, 150));
-    assert!(dark(&px, 225, 150) && dark(&px, 175, 150) && dark(&px, 120, 150) && dark(&px, 280, 150));
+    assert!(!dark(&px, 200, 150) && !dark(&px, 208, 150) && !dark(&px, 192, 150));
+    assert!(!dark(&px, 209, 146), "inside the circle near the line's edge");
+    assert!(dark(&px, 214, 150) && dark(&px, 186, 150), "just outside the circle");
+    // Round, not flat: at the line's edge the circle is narrower than at its middle.
+    assert!(dark(&px, 212, 146) || dark(&px, 212, 154));
+    assert!(dark(&px, 120, 150) && dark(&px, 280, 150));
 
-    // A vertical swipe across the right piece: one gesture, one undo step.
+    // A vertical swipe at x = 260 erases a band; ink drawn afterwards is not erased.
     mouse(&mut app, Phase::Down, [260.0, 100.0], 3.0);
     for i in 1..=20 {
         mouse(&mut app, Phase::Move, [260.0, 100.0 + i as f64 * 5.0], 3.0 + i as f64 / 120.0);
     }
     mouse(&mut app, Phase::Up, [260.0, 200.0], 3.5);
-    assert_eq!(app.doc.len(), 3);
     let px = gpu.frame(&mut app);
     assert!(!dark(&px, 260, 150) && dark(&px, 290, 150) && dark(&px, 230, 150));
+    app.tools.tool = infinite_canvas::ui::Tool::Pen;
+    draw_line(&mut app, 120.0, 240.0, 280.0);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 260, 120), "later ink stays");
+    assert_eq!(app.doc.len(), 4);
 
     app.undo();
-    assert_eq!(app.doc.len(), 2);
+    app.undo();
     assert!(dark(&gpu.frame(&mut app), 260, 150));
     app.undo();
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 200, 150));
     assert_eq!(app.doc.len(), 1);
-    assert!(dark(&gpu.frame(&mut app), 200, 150));
     app.redo();
-    app.redo();
-    assert_eq!(app.doc.len(), 3);
+    assert!(!dark(&gpu.frame(&mut app), 200, 150));
 }
 
 /// `cargo test --release -p infinite_canvas --test render_offscreen -- --ignored --nocapture`
@@ -318,4 +321,48 @@ fn rotated_view_renders_on_gpu_and_cpu_paths() {
     app.wheel_zoom([389.0, 150.0], -8.0);
     let px = gpu.frame(&mut app);
     assert!(dark(&px, 350, 150) && !dark(&px, 384, 110));
+}
+
+#[test]
+fn erased_edge_stays_sharp_when_magnified() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    draw_line(&mut app, 150.0, 100.0, 300.0);
+    app.tools.tool = infinite_canvas::ui::Tool::Eraser;
+    app.tools.eraser = 24.0;
+    mouse(&mut app, Phase::Down, [200.0, 150.0], 2.0);
+    mouse(&mut app, Phase::Up, [200.0, 150.0], 2.1);
+    // 2^10 around the hole's right edge (x = 212): both the line and the eraser now take
+    // the exact CPU path. The edge stays at x = 212 and stays sharp.
+    app.wheel_zoom([212.0, 150.0], 10.0);
+    let px = gpu.frame(&mut app);
+    assert!(!dark(&px, 209, 150) && !dark(&px, 209, 60), "erased side");
+    assert!(dark(&px, 215, 150) && dark(&px, 215, 240), "ink side");
+}
+
+#[test]
+fn long_stroke_in_progress_is_continuous() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    // ~600 samples (many frozen parts), finger still down.
+    mouse(&mut app, Phase::Down, [40.0, 150.0], 0.0);
+    for i in 1..=600 {
+        let x = 40.0 + i as f64 * 1.15;
+        mouse(&mut app, Phase::Move, [x, 150.0 + (x * 0.05).sin() * 20.0], i as f64 / 240.0);
+    }
+    let px = gpu.frame(&mut app);
+    // Every column along the stroke has ink near the curve: no gaps at part joints.
+    for x in (50..700).step_by(3) {
+        let y = 150.0 + (x as f64 * 0.05).sin() * 20.0;
+        let hit = (-6..=6).any(|dy| dark(&px, x, (y as i32 + dy) as u32));
+        assert!(hit, "gap at x = {x}");
+    }
+    mouse(&mut app, Phase::Up, [730.0, 150.0], 3.0);
+    assert_eq!(app.doc.len(), 1);
 }

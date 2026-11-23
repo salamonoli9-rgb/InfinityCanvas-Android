@@ -17,6 +17,8 @@ nigdy się nie rozpikselują. Ten sam kod działa na Androidzie i na desktopie L
   i dopiero wynik trafia do `f32` jako przesunięcie + skala instancji na GPU. Kreski oglądane
   w ogromnym powiększeniu (> 2^6 względem chwili rysowania) są przeliczane w `f64` na CPU
   i przycinane do ekranu, więc krawędzie zostają ostre i nieruchome.
+- **Gumka** to też kreska (kolor z alfą 0): kreski rysują się do przezroczystej warstwy, w której
+  ślad gumki zeruje piksele, a warstwa jest potem nakładana na tło.
 - **Indeks przestrzenny** per poziom skali (wielorozdzielcza siatka haszowana), pomijanie kresek
   poza ekranem, mniejszych od 0,5 px i astronomicznie większych od ekranu; cache tesselacji
   (lyon) z poziomami szczegółowości; MSAA 4×.
@@ -81,7 +83,7 @@ Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
 | rysowanie | rysik albo jeden palec |
 | przesuwanie + zoom | dwa palce (szczypanie wokół środka gestu), z bezwładnością po puszczeniu |
 | obrót | przekręcenie dwoma palcami (zaczyna się po ~10°, żeby zwykłe szczypanie nie obracało); blisko pionu (< 6°) płótno samo się prostuje; przycisk z kątem na pasku – wyprostuj |
-| gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika – ściera tylko to, przez co przejdzie (kreska jest przecinana) |
+| gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika – ściera dokładnie ślad gumki (okrągły, wektorowy, ostry przy każdym zoomie); kreski dorysowane później nie są ścierane |
 | palm rejection | po pierwszym użyciu rysika palce już nie rysują – jeden palec przesuwa płótno |
 
 Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy dołoży się drugi palec
