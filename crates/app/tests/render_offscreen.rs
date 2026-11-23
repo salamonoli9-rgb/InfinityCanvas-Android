@@ -565,13 +565,20 @@ fn preview_photo_drawings() {
                 view_formats: &[],
             });
             let view = tex.create_view(&Default::default());
-            for _ in 0..3 {
+            // New meshes are tessellated within a per-frame time budget: render until done.
+            let mut frames = 0;
+            loop {
                 let raw = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32))),
                     ..Default::default()
                 };
                 let _ = app.frame(Target::View { device: &device, queue: &queue, format: FORMAT, size: [w, h], view: &view }, &mut renderer, raw);
+                frames += 1;
+                if !renderer.needs_another_frame || frames > 500 {
+                    break;
+                }
             }
+            eprintln!("  complete after {frames} frames");
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: (w * h * 4) as u64,

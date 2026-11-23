@@ -172,10 +172,10 @@ pub fn chains(edge: &[bool], w: usize, h: usize, min_len: usize) -> Vec<Vec<[f32
 /// Whole pipeline: polylines in pixel coordinates, simplified.
 pub fn trace(gray: &[u8], w: usize, h: usize, opts: TraceOptions) -> Vec<Vec<[f32; 2]>> {
     let e = edges(gray, w, h, opts);
-    let min_len = (6.0 + 18.0 * (1.0 - opts.detail.clamp(0.0, 1.0))) as usize;
+    let min_len = (4.0 + 18.0 * (1.0 - opts.detail.clamp(0.0, 1.0))) as usize;
     chains(&e, w, h, min_len)
         .into_iter()
-        .take(4000)
+        .take(8000)
         .map(|c| {
             let pts: Vec<StrokePoint> = c.iter().map(|p| StrokePoint { x: p[0], y: p[1], pressure: 1.0 }).collect();
             simplify(&pts, 0.8).into_iter().map(|p| [p.x, p.y]).collect()

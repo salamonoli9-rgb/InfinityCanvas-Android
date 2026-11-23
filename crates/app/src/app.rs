@@ -555,7 +555,7 @@ impl CanvasApp {
         let mut strokes = Vec::new();
 
         if opts.colored {
-            let side = (160.0 + 260.0 * detail) as u32;
+            let side = (160.0 + 640.0 * detail) as u32;
             let rgb = img.thumbnail(side, side).to_rgb8();
             let (w, h) = (rgb.width() as usize, rgb.height() as usize);
             let patches = canvas_core::posterize::posterize(rgb.as_raw(), w, h, canvas_core::posterize::PosterizeOptions { detail });
@@ -572,11 +572,11 @@ impl CanvasApp {
         }
 
         if opts.outlines || !opts.colored {
-            let side = (500.0 + 700.0 * detail) as u32;
+            let side = (500.0 + 1100.0 * detail) as u32;
             let gray = img.thumbnail(side, side).to_luma8();
             let (w, h) = (gray.width() as usize, gray.height() as usize);
             // Over colours, only the main outlines: less detail than a pure line drawing.
-            let line_detail = if opts.colored { detail * 0.5 } else { detail };
+            let line_detail = if opts.colored { detail * 0.6 } else { detail };
             let lines = canvas_core::trace::trace(gray.as_raw(), w, h, canvas_core::trace::TraceOptions { detail: line_detail });
             let (k, origin) = place(w, h);
             let brush = match self.tools.brush {

@@ -19,10 +19,10 @@ pub struct PosterizeOptions {
     pub detail: f32,
 }
 
-fn blur_rgb(rgb: &[u8], w: usize, h: usize) -> Vec<[f32; 3]> {
+fn blur_rgb(rgb: &[u8], w: usize, h: usize, passes: usize) -> Vec<[f32; 3]> {
     // 3×3 box blur twice ≈ small Gaussian: removes JPEG noise before clustering.
     let mut img: Vec<[f32; 3]> = rgb.as_chunks::<3>().0.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
-    for _ in 0..2 {
+    for _ in 0..passes {
         let src = img.clone();
         for y in 0..h {
             for x in 0..w {
@@ -54,7 +54,8 @@ fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 
 /// k-means palette (farthest-point initialisation, deterministic).
-fn palette(px: &[[f32; 3]], k: usize) -> Vec<[f32; 3]> {
+/// `min_share`: colours used by a smaller fraction of pixels are dropped.
+fn palette(px: &[[f32; 3]], k: usize, min_share: f32) -> Vec<[f32; 3]> {
     let sample: Vec<[f32; 3]> = px.iter().step_by((px.len() / 8000).max(1)).copied().collect();
     let mean = sample.iter().fold([0.0f32; 3], |a, p| [a[0] + p[0], a[1] + p[1], a[2] + p[2]]);
     let n = sample.len() as f32;
@@ -85,7 +86,7 @@ fn palette(px: &[[f32; 3]], k: usize) -> Vec<[f32; 3]> {
         // Drop colours almost nobody uses (blends along edges, noise): their pixels go to
         // the nearest real colour instead of forming slivers.
         if round == 8 {
-            let min = n * 0.003;
+            let min = n * min_share;
             let kept: Vec<[f32; 3]> = centres.iter().zip(&sum).filter(|(_, s)| s[3] >= min).map(|(c, _)| *c).collect();
             if !kept.is_empty() {
                 centres = kept;
@@ -306,11 +307,12 @@ fn polygon_area(p: &[[f32; 2]]) -> f32 {
 pub fn posterize(rgb: &[u8], w: usize, h: usize, opts: PosterizeOptions) -> Vec<Patch> {
     assert_eq!(rgb.len(), w * h * 3);
     let detail = opts.detail.clamp(0.0, 1.0);
-    let px = blur_rgb(rgb, w, h);
-    let k = (6.0 + 14.0 * detail).round() as usize;
-    let centres = palette(&px, k);
+    // More detail: less pre-blur, rarer colours kept (thin dark lines, small text).
+    let px = blur_rgb(rgb, w, h, if detail > 0.6 { 1 } else { 2 });
+    let k = (6.0 + 26.0 * detail).round() as usize;
+    let centres = palette(&px, k, 0.003 - 0.0027 * detail);
     let mut labels: Vec<u16> = px.iter().map(|p| closest(&centres, *p) as u16).collect();
-    let min_area = ((w * h) as f32 * (0.004 - 0.0035 * detail)).max(8.0) as u32;
+    let min_area = ((w * h) as f32 * (0.003 - 0.00297 * detail)).max(4.0) as u32;
     merge_small(&mut labels, w, h, min_area);
     let (comp, sizes) = components(&labels, w, h);
     let mut seen = vec![false; sizes.len()];
@@ -336,7 +338,7 @@ pub fn posterize(rgb: &[u8], w: usize, h: usize, opts: PosterizeOptions) -> Vec<
         patches.push(Patch { color: [c[0] as u8, c[1] as u8, c[2] as u8], polygon: simple, area });
     }
     patches.sort_by(|a, b| b.area.total_cmp(&a.area));
-    patches.truncate(3000);
+    patches.truncate(8000);
     patches
 }
 
@@ -425,4 +427,5 @@ mod tests {
         assert!(fill_region(&ink, w, h, (5, 5)).is_none());
         assert!(fill_region(&ink, w, h, (10, 30)).is_none());
     }
+
 }
