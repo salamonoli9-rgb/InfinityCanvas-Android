@@ -12,7 +12,7 @@
         android:icon="@mipmap/ic_launcher"
         android:hasCode="false"
         android:extractNativeLibs="false"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/AppTheme"
         android:appCategory="productivity">
         <activity
             android:name="android.app.NativeActivity"

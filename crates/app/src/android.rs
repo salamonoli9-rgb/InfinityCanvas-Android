@@ -56,6 +56,8 @@ impl State {
         let renderer = Renderer::new(&gpu.device, gpu.config.format);
         self.size = size;
         self.canvas.resize(size);
+        self.canvas.reset_ui();
+        self.egui_pointer = None;
         self.gfx = Some(Graphics { gpu, renderer, _window: window });
     }
 
@@ -70,6 +72,7 @@ impl State {
             self.canvas.resize(size);
         }
         let r = app.content_rect();
+        log::debug!("window {size:?}, content rect {:?}", (r.left, r.top, r.right, r.bottom));
         self.canvas.safe_top = r.top.max(0) as f32 / self.canvas.pixels_per_point;
     }
 

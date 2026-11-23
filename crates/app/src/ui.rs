@@ -79,6 +79,46 @@ fn swatch(ui: &mut egui::Ui, color: Color32, selected: bool) -> egui::Response {
 }
 
 /// Draws the toolbar; returns actions and the screen rects (in points) the UI covers.
+fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
+    ui.selectable_value(&mut s.tool, Tool::Pen, "Pióro");
+    ui.selectable_value(&mut s.tool, Tool::Eraser, "Gumka");
+}
+
+fn colors(ui: &mut egui::Ui, s: &mut ToolState) {
+    let palette = s.palette.clone();
+    for c in palette {
+        if swatch(ui, c, s.color == c && s.tool == Tool::Pen).clicked() {
+            s.color = c;
+            s.tool = Tool::Pen;
+        }
+    }
+    if egui::color_picker::color_edit_button_srgba(ui, &mut s.color, egui::color_picker::Alpha::Opaque).changed() {
+        s.tool = Tool::Pen;
+    }
+}
+
+fn size_slider(ui: &mut egui::Ui, s: &mut ToolState) {
+    match s.tool {
+        Tool::Pen => {
+            ui.add(egui::Slider::new(&mut s.width, 0.5..=64.0).logarithmic(true).max_decimals(1).text("grubość"));
+        }
+        Tool::Eraser => {
+            ui.add(egui::Slider::new(&mut s.eraser, 2.0..=80.0).logarithmic(true).max_decimals(0).text("rozmiar"));
+        }
+    }
+}
+
+fn history_buttons(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
+    a.undo |= ui.add_enabled(info.can_undo, egui::Button::new("Cofnij")).clicked();
+    a.redo |= ui.add_enabled(info.can_redo, egui::Button::new("Ponów")).clicked();
+    a.home |= ui.button("Początek").on_hover_text("Wróć do początku (Home)").clicked();
+}
+
+fn zoom_label(ui: &mut egui::Ui, info: &Info) {
+    ui.label(egui::RichText::new(zoom_text(info.log_zoom)).monospace())
+        .on_hover_text(format!("log2 zoomu: {:.2}\nkresek: {}", info.log_zoom, info.strokes));
+}
+
 pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f32) -> (Actions, Vec<Rect>) {
     let mut a = Actions::default();
     let mut rects = Vec::new();
@@ -104,43 +144,42 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
         }
     });
 
-    let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top]).show(ctx, |ui| {
-        let max_w = (ctx.content_rect().width() - 16.0).max(200.0);
-        egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
-            ui.set_max_width(max_w);
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut s.tool, Tool::Pen, "Pióro");
-                ui.selectable_value(&mut s.tool, Tool::Eraser, "Gumka");
-                ui.separator();
-                let palette = s.palette.clone();
-                for c in palette {
-                    if swatch(ui, c, s.color == c && s.tool == Tool::Pen).clicked() {
-                        s.color = c;
-                        s.tool = Tool::Pen;
-                    }
-                }
-                if egui::color_picker::color_edit_button_srgba(ui, &mut s.color, egui::color_picker::Alpha::Opaque)
-                    .changed()
-                {
-                    s.tool = Tool::Pen;
-                }
-                ui.separator();
-                match s.tool {
-                    Tool::Pen => {
-                        ui.add(egui::Slider::new(&mut s.width, 0.5..=64.0).logarithmic(true).max_decimals(1).text("grubość"));
-                    }
-                    Tool::Eraser => {
-                        ui.add(egui::Slider::new(&mut s.eraser, 2.0..=80.0).logarithmic(true).max_decimals(0).text("rozmiar"));
-                    }
-                }
-                ui.separator();
-                a.undo |= ui.add_enabled(info.can_undo, egui::Button::new("Cofnij")).clicked();
-                a.redo |= ui.add_enabled(info.can_redo, egui::Button::new("Ponów")).clicked();
-                a.home |= ui.button("Początek").on_hover_text("Wróć do początku (Home)").clicked();
-                ui.separator();
-                ui.label(egui::RichText::new(zoom_text(info.log_zoom)).monospace())
-                    .on_hover_text(format!("log2 zoomu: {:.2}\nkresek: {}", info.log_zoom, info.strokes));
-            });
+    // Explicit rows instead of `horizontal_wrapped`: egui's sliders are nested horizontal
+    // groups that never wrap, which pushed the toolbar off narrow phone screens.
+    let screen_w = ctx.content_rect().width();
+    let frame = egui::Frame::popup(&ctx.global_style()).corner_radius(CornerRadius::same(12));
+    let inner_w = (screen_w - 16.0 - frame.total_margin().sum().x).max(150.0);
+    let compact = inner_w < 760.0;
+    let anchor = if compact { Align2::LEFT_TOP } else { Align2::CENTER_TOP };
+    let offset = if compact { [8.0, 8.0 + safe_top] } else { [0.0, 8.0 + safe_top] };
+    let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(anchor, offset).show(ctx, |ui| {
+        frame.show(ui, |ui| {
+            ui.set_max_width(inner_w);
+            if compact {
+                ui.horizontal(|ui| {
+                    tool_buttons(ui, s);
+                    ui.separator();
+                    history_buttons(ui, info, &mut a);
+                });
+                ui.horizontal_wrapped(|ui| colors(ui, s));
+                ui.horizontal(|ui| {
+                    size_slider(ui, s);
+                    ui.separator();
+                    zoom_label(ui, info);
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    tool_buttons(ui, s);
+                    ui.separator();
+                    colors(ui, s);
+                    ui.separator();
+                    size_slider(ui, s);
+                    ui.separator();
+                    history_buttons(ui, info, &mut a);
+                    ui.separator();
+                    zoom_label(ui, info);
+                });
+            }
         });
     });
     rects.push(resp.response.rect);
@@ -158,5 +197,38 @@ mod tests {
         assert_eq!(super::zoom_text(0.0), "100%");
         assert_eq!(super::zoom_text(100.0), "×10^30");
         assert_eq!(super::zoom_text(-100.0), "×10^-30");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// The toolbar must fit inside a narrow phone screen (360 pt wide).
+    #[test]
+    fn toolbar_fits_phone_width() {
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|st| {
+            st.spacing.interact_size = egui::vec2(40.0, 34.0);
+            st.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            st.spacing.button_padding = egui::vec2(8.0, 6.0);
+            st.spacing.slider_width = 120.0;
+        });
+        let mut s = ToolState::default();
+        let info = Info { can_undo: true, can_redo: false, log_zoom: 3.4, strokes: 2 };
+        let mut rect = Rect::NOTHING;
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                let (_, r) = toolbar(ui.ctx(), &mut s, &info, 24.0);
+                rect = r[0];
+            });
+            out.textures_delta.clear();
+        }
+        assert!(rect.min.x >= 0.0 && rect.max.x <= 360.0, "{rect:?}");
+        assert!(rect.min.y >= 24.0, "{rect:?}");
     }
 }

@@ -111,7 +111,19 @@ impl CanvasApp {
         .with_touch_style()
     }
 
+    /// Starts a fresh egui context. Needed when the GPU renderer is recreated (Android
+    /// surface loss): the new renderer has no textures, and a fresh context re-uploads them.
+    pub fn reset_ui(&mut self) {
+        self.egui_ctx = egui::Context::default();
+        self.apply_style();
+    }
+
     fn with_touch_style(self) -> Self {
+        self.apply_style();
+        self
+    }
+
+    fn apply_style(&self) {
         self.egui_ctx.set_theme(egui::Theme::Light);
         if cfg!(target_os = "android") {
             self.egui_ctx.all_styles_mut(|st| {
@@ -121,7 +133,6 @@ impl CanvasApp {
                 st.spacing.slider_width = 120.0;
             });
         }
-        self
     }
 
     pub fn resize(&mut self, size: [u32; 2]) {
