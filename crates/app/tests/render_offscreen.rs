@@ -623,3 +623,40 @@ fn photo_turned_into_a_coloured_drawing() {
     assert!(corner[0] > 180 && corner[2] < 80, "corner filled: {corner:?}");
     assert!(at(130, 250)[1] > 200, "outside the picture: background");
 }
+
+#[test]
+fn bucket_fill_fills_the_enclosed_area() {
+    use canvas_core::stroke::Brush;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 4.0;
+    // Closed square 400..700 × 130..290 and a small closed square (island) inside it.
+    draw_path(&mut app, &[[400.0, 130.0], [700.0, 130.0], [700.0, 290.0], [400.0, 290.0], [400.0, 130.0]], 0.0);
+    draw_path(&mut app, &[[530.0, 190.0], [570.0, 190.0], [570.0, 230.0], [530.0, 230.0], [530.0, 190.0]], 5.0);
+    assert_eq!(app.doc.len(), 2);
+    app.tools.set_brush(Brush::Fill);
+    app.tools.color = egui::Color32::from_rgb(230, 40, 40);
+    let tap = |app: &mut CanvasApp, p: [f64; 2], t: f64| {
+        mouse(app, Phase::Down, p, t);
+        mouse(app, Phase::Up, p, t + 0.05);
+    };
+    tap(&mut app, [450.0, 260.0], 10.0);
+    let px = gpu.frame(&mut app);
+    assert_eq!(app.doc.len(), 3, "one fill stroke");
+    let at = |x: u32, y: u32| { let i = ((y * W + x) * 4) as usize; [px[i], px[i + 1], px[i + 2]] };
+    let red = |c: [u8; 3]| c[0] > 180 && c[1] < 90;
+    assert!(red(at(450, 260)) && red(at(650, 160)) && red(at(510, 210)), "inside is filled");
+    assert!(!red(at(550, 210)), "the island stays empty");
+    assert!(!red(at(380, 200)) && !red(at(720, 200)), "outside not filled");
+    assert!(dark(&px, 400, 200) && dark(&px, 700, 220), "the outline stays on top / visible");
+    // Outside the square nothing is enclosed: no stroke added.
+    tap(&mut app, [200.0, 250.0], 12.0);
+    gpu.frame(&mut app);
+    assert_eq!(app.doc.len(), 3);
+    // Undo removes the fill.
+    app.undo();
+    assert!(!red({ let px = gpu.frame(&mut app); let i = ((260 * W + 450) * 4) as usize; [px[i], px[i + 1], px[i + 2]] }));
+}

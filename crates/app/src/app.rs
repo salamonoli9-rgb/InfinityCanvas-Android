@@ -112,6 +112,10 @@ pub struct CanvasApp {
     /// Bytes of a photo waiting for "trace over it" / "turn into a drawing".
     pending_photo: Option<Vec<u8>>,
     pending_preview: Option<image::RgbaImage>,
+    /// Screen point of a bucket fill to do on the next frame (it needs the renderer).
+    pending_bucket: Option<[f64; 2]>,
+    /// Short message at the bottom of the screen, with the time it appeared.
+    toast: Option<(String, Instant)>,
     save_thread: Option<std::thread::JoinHandle<()>>,
     /// Set when a different document was loaded: cached meshes are keyed by stroke id.
     clear_render_cache: bool,
@@ -236,6 +240,8 @@ impl CanvasApp {
             photo_lib: None,
             pending_photo: None,
             pending_preview: None,
+            pending_bucket: None,
+            toast: None,
             save_thread: None,
             clear_render_cache: false,
         }
@@ -603,6 +609,75 @@ impl CanvasApp {
         Ok(n)
     }
 
+    /// Bucket fill: renders the current view offscreen, floods the enclosed area around the
+    /// screen point `pos` and adds it as a vector fill (with holes around islands of ink).
+    fn bucket_fill(&mut self, target: Target, renderer: &mut Renderer, pos: [f64; 2]) {
+        let vp = self.viewport;
+        // Mask at (slightly more than) screen resolution; width a multiple of 64 for readback.
+        let w = ((vp[0] / 64.0).ceil() as u32 * 64).max(64);
+        let k = w as f64 / vp[0];
+        let h = ((vp[1] * k).round() as u32).max(1);
+        let mut cam = self.camera.clone();
+        cam.log_zoom += k.log2();
+        let mvp = [w as f64, h as f64];
+        let visible = self.doc.query(&cam, mvp, [0.0, 0.0, mvp[0], mvp[1]]);
+        let (device, queue, format) = target.device_queue_format();
+        // Magenta background: anything visibly different is ink (white ink included).
+        let bg = [1.0, 0.0, 1.0, 1.0];
+        let px = renderer.render_rgba(
+            device,
+            queue,
+            format,
+            [w, h],
+            FrameInput {
+                visible: &visible,
+                doc: &self.doc,
+                active: None,
+                images: &[],
+                log_zoom: cam.log_zoom,
+                rotation: cam.rot(),
+                background: bg,
+                egui: None,
+                textures: Default::default(),
+            },
+        );
+        if px.len() != (w * h * 4) as usize {
+            return;
+        }
+        let ink: Vec<bool> = px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| (255 - p[0] as i32).abs() + p[1] as i32 + (255 - p[2] as i32).abs() > 90)
+            .collect();
+        let seed = ((pos[0] * k) as usize, (pos[1] * k) as usize);
+        let Some(loops) = canvas_core::posterize::fill_region(&ink, w as usize, h as usize, seed) else {
+            self.toast = Some(("Tu nie ma zamkniętego obszaru – obrysuj go albo przeciągnij, by narysować kształt".into(), Instant::now()));
+            return;
+        };
+        let level = self.camera.level();
+        let c = self.camera.screen_to_world(pos, vp).mul_pow2(level);
+        let anchor = [c.x.floor_at(0), c.y.floor_at(0)];
+        let frame = self.camera.level_frame(level, vp);
+        let col = self.tools.color;
+        // The fill's thin edge (1 mask px) overlaps the surrounding ink slightly: no gaps.
+        let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [col.r(), col.g(), col.b(), col.a()], (1.0 / k / frame.scale) as f32);
+        s.brush = Brush::Fill;
+        for (i, l) in loops.iter().enumerate() {
+            if i > 0 {
+                let last = *s.points.last().expect("previous loop");
+                s.points.push(StrokePoint { pressure: Stroke::SUBPATH_BREAK, ..last });
+            }
+            for p in l {
+                let q = frame.screen_to_local([p[0] as f64 / k, p[1] as f64 / k], &anchor, None);
+                s.points.push(StrokePoint { x: q[0] as f32, y: q[1] as f32, pressure: 1.0 });
+            }
+        }
+        s.refresh_cache();
+        self.history.apply(&mut self.doc, Action::Add(vec![s]));
+        self.changed();
+    }
+
     /// Decodes photos that aren't decoded yet (after loading a project, undo of a delete…).
     fn decode_images(&mut self) {
         let missing: Vec<(ImageId, Arc<Vec<u8>>)> =
@@ -837,6 +912,19 @@ impl CanvasApp {
                 self.eraser_cursor = None;
                 if let Some(a) = self.active.take() {
                     let mut s = a.stroke;
+                    // A tap with the fill brush = bucket fill of the enclosed area there.
+                    if s.brush == Brush::Fill && !s.is_eraser() {
+                        let f = self.camera.level_frame(s.level, self.viewport);
+                        let len: f32 = s.points.windows(2).map(|w| ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt()).sum();
+                        if (len as f64) * f.scale < 12.0 * self.pixels_per_point as f64 {
+                            let p = s.points[0];
+                            let o = f.anchor_to_screen(&s.anchor, s.cache.anchor_fast);
+                            let v = f.local_vec_to_screen([p.x as f64, p.y as f64]);
+                            self.pending_bucket = Some([o[0] + v[0], o[1] + v[1]]);
+                            self.wants_redraw = true;
+                            return;
+                        }
+                    }
                     s.refresh_cache();
                     self.history.apply(&mut self.doc, Action::Add(vec![s]));
                     self.changed();
@@ -927,7 +1015,8 @@ impl CanvasApp {
         }
         a.stroke.push(pt);
         let n = a.stroke.points.len();
-        if n - a.frozen_upto > FROZEN_PART {
+        // (A fill is previewed whole: filling it in parts would look wrong.)
+        if a.stroke.brush != Brush::Fill && n - a.frozen_upto > FROZEN_PART {
             // Parts share their boundary point; round caps make the joint seamless.
             let end = a.frozen_upto + FROZEN_PART;
             let lod = lod_for(a.stroke.level, self.camera.log_zoom).min(2);
@@ -1040,6 +1129,9 @@ impl CanvasApp {
         if std::mem::take(&mut self.want_gallery) && self.screen == Screen::Canvas {
             self.leave_to_gallery(target, renderer);
         }
+        if let Some(pos) = self.pending_bucket.take() {
+            self.bucket_fill(target, renderer, pos);
+        }
 
         // UI.
         let info = ui::Info {
@@ -1053,6 +1145,7 @@ impl CanvasApp {
         let mut gallery_actions = Vec::new();
         let mut photo_actions = Vec::new();
         let mut finish_edit = false;
+        let mut toast_visible = false;
         let mut rects = Vec::new();
         let lib_busy = self.photo_lib.as_mut().is_some_and(|l| l.poll());
         let ctx = self.egui_ctx.clone();
@@ -1086,6 +1179,12 @@ impl CanvasApp {
             );
             if self.photo_panel.open {
                 r.push(egui::Rect::EVERYTHING);
+            }
+            if let Some((msg, t)) = &self.toast
+                && t.elapsed() < Duration::from_millis(3000)
+            {
+                ui::toast(ui.ctx(), msg);
+                toast_visible = true;
             }
             if self.image_edit.is_some() && ui::image_edit_bar(ui.ctx()).0 {
                 finish_edit = true;
@@ -1183,7 +1282,7 @@ impl CanvasApp {
         );
         self.stats.record(now.elapsed().as_secs_f64(), visible.len(), query_time, renderer.timings);
         let egui_repaint = output.viewport_output.values().any(|v| v.repaint_delay.is_zero());
-        self.wants_redraw |= renderer.needs_another_frame || egui_repaint || self.inertia.active() || lib_busy;
+        self.wants_redraw |= renderer.needs_another_frame || egui_repaint || self.inertia.active() || lib_busy || toast_visible;
         output.platform_output
     }
 }

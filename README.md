@@ -89,7 +89,7 @@ Przycisk z nazwą pędzla na pasku otwiera listę. Każdy pędzel pamięta włas
 | Ołówek miękki / twardy | półprzezroczysty, z ziarnem papieru; nacisk = ciemniej |
 | Marker | półprzezroczysty, ścięta końcówka, nakładane kreski ciemnieją |
 | Kropkowana | kropki co ~2 grubości |
-| Wypełnienie | wypełnia kolorem kształt obrysowany pociągnięciem |
+| Wypełnienie | **stuknięcie** = wiadro z farbą: wypełnia obszar zamknięty kreskami (omija wyspy w środku); **przeciągnięcie** = rysuje wypełniony kształt |
 
 Wszystkie pędzle są wektorowe (ziarno ołówka liczone w shaderze we współrzędnych kreski), więc
 nie tracą ostrości przy zoomie. Kreska półprzezroczysta nie ciemnieje tam, gdzie nachodzi sama

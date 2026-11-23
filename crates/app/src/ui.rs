@@ -509,7 +509,7 @@ fn picker(ui: &mut egui::Ui, st: &mut PhotoPanel, lib: Option<&mut crate::photos
             let avail = ui.available_width();
             let cols = ((avail + 6.0) / 106.0).floor().max(3.0) as usize;
             let side = (avail - 6.0 * (cols - 1) as f32) / cols as f32;
-            egui::ScrollArea::vertical().max_height(max_h.max(200.0)).show(ui, |ui| {
+            egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).max_height(max_h.max(200.0)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 for row in entries.chunks(cols) {
                     ui.horizontal(|ui| {
@@ -547,6 +547,17 @@ fn picker(ui: &mut egui::Ui, st: &mut PhotoPanel, lib: Option<&mut crate::photos
             });
         }
     }
+}
+
+/// A short message near the bottom of the screen.
+pub fn toast(ctx: &egui::Context, msg: &str) {
+    let max_w = (ctx.content_rect().width() - 48.0).max(160.0);
+    egui::Area::new(egui::Id::unique("toast")).anchor(Align2::CENTER_BOTTOM, [0.0, -32.0]).interactable(false).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
+            ui.set_max_width(max_w);
+            ui.label(msg);
+        });
+    });
 }
 
 /// Bar shown while a photo is being moved: what the fingers do, and "done".
@@ -625,7 +636,7 @@ pub fn gallery(root: &mut egui::Ui, st: &mut GalleryState, projects: &Projects, 
             let cols = ((avail + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP)).floor().max(2.0) as usize;
             let card_w = (avail - CARD_GAP * (cols - 1) as f32) / cols as f32;
             let thumb = egui::vec2(card_w, card_w * THUMB_ASPECT);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(CARD_GAP, CARD_GAP);
                 let items: Vec<Option<&ProjectInfo>> = std::iter::once(None).chain(st.list.iter().map(Some)).collect();
                 for row in items.chunks(cols) {
@@ -783,4 +794,52 @@ mod layout_tests {
         }
         assert!(bar.min.x >= 0.0 && bar.max.x <= 360.0 && bar.max.y <= 800.0, "{bar:?}");
     }
+
+    /// Dragging over clickable cells scrolls the list (touch screens send mouse-like events)
+    /// and does not count as a click.
+    #[test]
+    fn drag_scrolls_a_grid_of_clickable_cells() {
+        let ctx = egui::Context::default();
+        let mut first_cell_y = Vec::new();
+        let mut clicked = false;
+        let mut t = 0.0;
+        let mut run = |events: Vec<egui::Event>, first_cell_y: &mut Vec<f32>, clicked: &mut bool| {
+            t += 1.0 / 60.0;
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 600.0))),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |root| {
+                egui::Window::new("t").fixed_pos([0.0, 0.0]).show(root.ctx(), |ui| {
+                egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).max_height(500.0).show(ui, |ui| {
+                    for i in 0..40 {
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(100.0, 100.0), Sense::click());
+                        if i == 0 {
+                            first_cell_y.push(rect.min.y);
+                        }
+                        *clicked |= resp.clicked();
+                    }
+                });
+                });
+            });
+            out.textures_delta.clear();
+        };
+        // egui hit-tests against the previous frame's widgets: let the list settle first.
+        for _ in 0..3 {
+            run(vec![], &mut first_cell_y, &mut clicked);
+        }
+        let p = |y: f32| egui::pos2(50.0, y);
+        run(vec![egui::Event::PointerMoved(p(400.0)), egui::Event::PointerButton { pos: p(400.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }], &mut first_cell_y, &mut clicked);
+        for y in (150..400).rev().step_by(25) {
+            run(vec![egui::Event::PointerMoved(p(y as f32))], &mut first_cell_y, &mut clicked);
+        }
+        run(vec![egui::Event::PointerButton { pos: p(150.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }, egui::Event::PointerGone], &mut first_cell_y, &mut clicked);
+        run(vec![], &mut first_cell_y, &mut clicked);
+        let moved = first_cell_y[0] - first_cell_y.last().unwrap();
+        assert!(moved > 150.0, "scrolled by {moved}");
+        assert!(!clicked, "a drag is not a click");
+    }
+
 }

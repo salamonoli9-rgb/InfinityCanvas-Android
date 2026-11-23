@@ -235,6 +235,68 @@ fn trace_boundary(comp: &[u32], w: usize, h: usize, start: usize) -> Vec<[f32; 2
     out
 }
 
+/// Bucket fill: the region of non-ink pixels connected to `seed` (4-neighbourhood), as an
+/// outer outline plus the outlines of its holes (islands of ink or other enclosed areas).
+/// `None` if the seed is on ink or the region leaks out to the image border (not enclosed).
+pub fn fill_region(ink: &[bool], w: usize, h: usize, seed: (usize, usize)) -> Option<Vec<Vec<[f32; 2]>>> {
+    let s = seed.1 * w + seed.0;
+    if seed.0 >= w || seed.1 >= h || ink[s] {
+        return None;
+    }
+    // Flood the region.
+    let mut region = vec![false; w * h];
+    let mut stack = vec![s];
+    region[s] = true;
+    while let Some(i) = stack.pop() {
+        let (x, y) = (i % w, i / w);
+        if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
+            return None; // open to the outside
+        }
+        for j in [i - 1, i + 1, i - w, i + w] {
+            if !region[j] && !ink[j] {
+                region[j] = true;
+                stack.push(j);
+            }
+        }
+    }
+    let ids: Vec<u32> = region.iter().map(|&r| u32::from(r)).collect();
+    let first = region.iter().position(|&r| r)?;
+    let mut loops = vec![trace_boundary(&ids, w, h, first)];
+    // Holes: components of the rest that don't touch the border (they are inside the region).
+    let rest: Vec<u16> = region.iter().map(|&r| u16::from(!r)).collect();
+    let (comp, sizes) = components(&rest, w, h);
+    let mut touches_border = vec![false; sizes.len()];
+    for x in 0..w {
+        touches_border[comp[x] as usize] = true;
+        touches_border[comp[(h - 1) * w + x] as usize] = true;
+    }
+    for y in 0..h {
+        touches_border[comp[y * w] as usize] = true;
+        touches_border[comp[y * w + w - 1] as usize] = true;
+    }
+    let mut seen = vec![false; sizes.len()];
+    for i in 0..w * h {
+        let c = comp[i] as usize;
+        if rest[i] == 0 || seen[c] || touches_border[c] {
+            continue;
+        }
+        seen[c] = true;
+        if sizes[c] >= 3 {
+            loops.push(trace_boundary(&comp, w, h, i));
+        }
+    }
+    Some(
+        loops
+            .into_iter()
+            .map(|l| {
+                let pts: Vec<crate::stroke::StrokePoint> = l.iter().map(|p| crate::stroke::StrokePoint { x: p[0], y: p[1], pressure: 1.0 }).collect();
+                crate::mesh::simplify(&pts, 0.6).iter().map(|p| [p.x, p.y]).collect::<Vec<_>>()
+            })
+            .filter(|l: &Vec<[f32; 2]>| l.len() >= 3)
+            .collect(),
+    )
+}
+
 fn polygon_area(p: &[[f32; 2]]) -> f32 {
     let n = p.len();
     0.5 * (0..n).map(|i| p[i][0] * p[(i + 1) % n][1] - p[(i + 1) % n][0] * p[i][1]).sum::<f32>().abs()
@@ -339,5 +401,28 @@ mod tests {
         let rgb = image(w, h, |x, y| if (x * 31 + y * 17) % 97 == 0 { [0, 0, 0] } else { [128, 128, 128] });
         let p = posterize(&rgb, w, h, PosterizeOptions { detail: 0.5 });
         assert!(p.len() <= 2, "{}", p.len());
+    }
+
+    #[test]
+    fn bucket_fill_inside_a_ring_with_a_hole() {
+        // Ink: a square ring (outline) and a small filled square inside it (an "island").
+        let (w, h) = (60, 60);
+        let ink: Vec<bool> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let ring = (10..50).contains(&x) && (10..50).contains(&y) && !((12..48).contains(&x) && (12..48).contains(&y));
+                let island = (25..35).contains(&x) && (25..35).contains(&y);
+                ring || island
+            })
+            .collect();
+        let loops = fill_region(&ink, w, h, (15, 15)).expect("enclosed");
+        assert_eq!(loops.len(), 2, "outline + hole");
+        let a0 = polygon_area(&loops[0]);
+        let a1 = polygon_area(&loops[1]);
+        assert!((a0 - 36.0 * 36.0).abs() < 1.0, "inside of the ring: {a0}");
+        assert!((a1 - 100.0).abs() < 1.0, "island: {a1}");
+        // Outside the ring is open to the border; on ink there is nothing to fill.
+        assert!(fill_region(&ink, w, h, (5, 5)).is_none());
+        assert!(fill_region(&ink, w, h, (10, 30)).is_none());
     }
 }

@@ -47,6 +47,9 @@ pub fn tessellate(stroke: &Stroke, lod: u32) -> Mesh {
 /// frozen parts plus a live tail, so long strokes don't get slower to draw). Interior part
 /// ends get round caps; flat caps apply only at the stroke's real ends.
 pub fn tessellate_part(stroke: &Stroke, range: std::ops::Range<usize>, lod: u32) -> Mesh {
+    if stroke.brush == Brush::Fill && stroke.points[range.clone()].iter().any(|p| p.pressure < 0.0) {
+        return tessellate_fill_with_holes(stroke, &stroke.points[range], lod.min(MAX_LOD));
+    }
     let mut lod = lod.min(MAX_LOD);
     let caps = [stroke.flat_caps[0] && range.start == 0, stroke.flat_caps[1] && range.end == stroke.points.len()];
     // Raw input is very dense (a sample every ~0.4 px); drop points that don't change the
@@ -209,6 +212,43 @@ fn dots(out: &mut VertexBuffers<[f32; 3], u32>, stroke: &Stroke, pts: &[StrokePo
         }
         walked += len;
     }
+}
+
+/// A fill made of several outlines (shape + holes), separated by [`Stroke::SUBPATH_BREAK`]
+/// points; even-odd rule, so holes stay empty.
+fn tessellate_fill_with_holes(stroke: &Stroke, points: &[StrokePoint], lod: u32) -> Mesh {
+    let tolerance = 0.2 / (1u32 << lod) as f32;
+    let loops: Vec<Vec<StrokePoint>> = points
+        .split(|p| p.pressure < 0.0)
+        .map(|l| simplify(&dedup(l), SIMPLIFY_TOLERANCE / (1u32 << lod) as f32))
+        .filter(|l| l.len() >= 3)
+        .map(|l| dedup(&smooth_keeping_corners(&l, tolerance)))
+        .collect();
+    let mut out: VertexBuffers<[f32; 3], u32> = VertexBuffers::new();
+    let mut fill = FillTessellator::new();
+    let opts = FillOptions::tolerance(tolerance).with_fill_rule(lyon_tessellation::FillRule::EvenOdd);
+    {
+        let mut bb = BuffersBuilder::new(&mut out, |v: FillVertex| {
+            let p = v.position();
+            [p.x, p.y, 1.0]
+        });
+        let mut b = fill.builder(&opts, &mut bb);
+        for l in &loops {
+            b.begin(point(l[0].x, l[0].y));
+            for p in &l[1..] {
+                b.line_to(point(p.x, p.y));
+            }
+            b.end(true);
+        }
+        if let Err(e) = b.build() {
+            log::warn!("fill of stroke {} failed: {e:?}", stroke.id);
+        }
+    }
+    // A thin outline along every edge closes hairline gaps to the surrounding ink.
+    for l in &loops {
+        ribbon(&mut out, stroke, l, tolerance, [false; 2], true);
+    }
+    Mesh { vertices: out.vertices, indices: out.indices }
 }
 
 /// The area enclosed by the (implicitly closed) path, non-zero rule.
@@ -480,5 +520,22 @@ mod tests {
             assert!(v[0] > -0.2 && v[0] < 100.2 && v[1] > -0.2 && v[1] < 100.2, "{v:?}");
         }
         assert!(covers(&m, [99.0, 1.0]) && covers(&m, [1.0, 99.0]), "corners filled");
+    }
+
+    #[test]
+    fn fill_with_a_hole() {
+        let mut s = Stroke::new(1, 0, [BigInt::from(0), BigInt::from(0)], [0, 0, 0, 255], 0.1);
+        s.brush = Brush::Fill;
+        let sq = |a: f32, b: f32| [[a, a], [b, a], [b, b], [a, b]];
+        for p in sq(0.0, 100.0) {
+            s.push(StrokePoint { x: p[0], y: p[1], pressure: 1.0 });
+        }
+        s.push(StrokePoint { x: 0.0, y: 0.0, pressure: Stroke::SUBPATH_BREAK });
+        for p in sq(40.0, 60.0) {
+            s.push(StrokePoint { x: p[0], y: p[1], pressure: 1.0 });
+        }
+        let m = tessellate(&s, 0);
+        assert!(covers(&m, [10.0, 10.0]) && covers(&m, [90.0, 50.0]));
+        assert!(!covers(&m, [50.0, 50.0]), "the hole stays empty");
     }
 }

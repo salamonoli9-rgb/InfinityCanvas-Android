@@ -145,6 +145,10 @@ impl Stroke {
         s
     }
 
+    /// In a [`Brush::Fill`] stroke, a point with this pressure separates outlines: the first
+    /// outline is the shape, the following ones are holes (bucket fill around islands).
+    pub const SUBPATH_BREAK: f32 = -1.0;
+
     /// Colour with zero alpha marks an eraser stroke: it clears earlier ink under it.
     pub const ERASER_COLOR: [u8; 4] = [0, 0, 0, 0];
 
