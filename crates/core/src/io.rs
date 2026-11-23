@@ -7,10 +7,19 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 4] = b"ICNV";
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
+
+/// Version 6: reference images.
+#[derive(Serialize, Deserialize)]
+struct FileV6 {
+    camera: Camera,
+    next_id: StrokeId,
+    strokes: Vec<Stroke>,
+    images: Vec<crate::image::RefImage>,
+}
 
 /// Version 5: strokes have a brush.
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct FileV5 {
     camera: Camera,
     next_id: StrokeId,
@@ -145,7 +154,12 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 pub fn encode(doc: &Document, camera: &Camera) -> Vec<u8> {
-    let file = FileV5 { camera: camera.clone(), next_id: doc.next_id(), strokes: doc.strokes().cloned().collect() };
+    let file = FileV6 {
+        camera: camera.clone(),
+        next_id: doc.next_id(),
+        strokes: doc.strokes().cloned().collect(),
+        images: doc.images().cloned().collect(),
+    };
     let mut out = Vec::with_capacity(64 + doc.len() * 128);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
@@ -178,6 +192,14 @@ pub fn decode(bytes: &[u8]) -> Result<(Document, Camera), LoadError> {
         5 => {
             let f: FileV5 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
             Ok((Document::from_strokes(f.strokes, f.next_id), f.camera))
+        }
+        6 => {
+            let f: FileV6 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
+            let mut doc = Document::from_strokes(f.strokes, f.next_id);
+            for img in f.images {
+                doc.insert_image(img);
+            }
+            Ok((doc, f.camera))
         }
         v => Err(LoadError::UnsupportedVersion(v)),
     }
@@ -221,10 +243,13 @@ mod tests {
         s.push(StrokePoint { x: 1.0, y: -2.0, pressure: 0.5 });
         s.push(StrokePoint { x: 5.0, y: 2.0, pressure: 0.7 });
         doc.insert(s.clone());
+        let img = crate::image::RefImage::place(doc.alloc_id(), &cam, [100.0, 100.0], [3, 2], std::sync::Arc::new(vec![1, 2, 3]), 0.8);
+        doc.insert_image(img.clone());
         let bytes = encode(&doc, &cam);
         let (d2, c2) = decode(&bytes).unwrap();
         assert_eq!(c2, cam);
         assert_eq!(d2.get(s.id), Some(&s));
+        assert_eq!(d2.image(img.id), Some(&img));
         assert_eq!(d2.next_id(), doc.next_id());
 
         let dir = std::env::temp_dir().join(format!("icnv-test-{}", std::process::id()));
@@ -238,7 +263,7 @@ mod tests {
     fn rejects_garbage() {
         assert!(matches!(decode(b"nope"), Err(LoadError::BadMagic)));
         assert!(matches!(decode(b"ICNV\x09\x00"), Err(LoadError::UnsupportedVersion(9))));
-        assert!(matches!(decode(b"ICNV\x05\x00\xff"), Err(LoadError::Corrupt(_))));
+        assert!(matches!(decode(b"ICNV\x06\x00\xff"), Err(LoadError::Corrupt(_))));
     }
 
     #[test]

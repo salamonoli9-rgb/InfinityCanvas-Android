@@ -5,6 +5,7 @@ pub mod camera;
 pub mod coords;
 pub mod document;
 pub mod history;
+pub mod image;
 pub mod io;
 pub mod mesh;
 pub mod smoothing;

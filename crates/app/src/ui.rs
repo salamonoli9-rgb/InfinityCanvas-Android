@@ -93,6 +93,8 @@ pub struct Actions {
     pub menu: bool,
     /// Rotate the view back to upright.
     pub upright: bool,
+    /// Open the photos window.
+    pub photos: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -167,6 +169,10 @@ fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
     a.home |= ui.button("Początek").on_hover_text("Wróć do początku (Home)").clicked();
 }
 
+fn photos_button(ui: &mut egui::Ui, a: &mut Actions) {
+    a.photos |= ui.button("Zdjęcia").on_hover_text("Zdjęcie do odrysowania").clicked();
+}
+
 fn menu_button(ui: &mut egui::Ui, a: &mut Actions) {
     a.menu |= ui.button("Projekty").on_hover_text("Wróć do listy projektów").clicked();
 }
@@ -226,7 +232,10 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     tool_buttons(ui, s);
                     history_buttons(ui, info, &mut a);
                 });
-                ui.horizontal_wrapped(|ui| colors(ui, s));
+                ui.horizontal_wrapped(|ui| {
+                    colors(ui, s);
+                    photos_button(ui, &mut a);
+                });
                 ui.horizontal(|ui| {
                     ui.spacing_mut().slider_width = ui.spacing().slider_width.min(90.0);
                     size_slider(ui, s, false);
@@ -247,6 +256,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     ui.separator();
                     history_buttons(ui, info, &mut a);
                     home_button(ui, &mut a);
+                    photos_button(ui, &mut a);
                     ui.separator();
                     rotation_button(ui, info, &mut a);
                     zoom_label(ui, info);
@@ -260,6 +270,188 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
         rects.push(Rect::EVERYTHING);
     }
     (a, rects)
+}
+
+/// One reference photo as listed in the photos window.
+pub struct PhotoInfo {
+    pub id: u64,
+    pub opacity: f32,
+    pub visible: bool,
+}
+
+#[derive(Default)]
+pub struct PhotoPanel {
+    pub open: bool,
+    /// Showing the grid of photos to pick from.
+    pub picking: bool,
+    thumbs: HashMap<String, Option<egui::TextureHandle>>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum PhotoAction {
+    StartPicking,
+    RequestAccess,
+    Pick(String),
+    Opacity(u64, f32),
+    ToggleVisible(u64),
+    Delete(u64),
+    Edit(u64),
+}
+
+/// The photos window: photos in this drawing (opacity, move, hide, delete) and the picker.
+pub fn photos_window(
+    ctx: &egui::Context,
+    st: &mut PhotoPanel,
+    photos: &[PhotoInfo],
+    lib: Option<&mut crate::photos::PhotoLibrary>,
+    safe_top: f32,
+) -> Vec<PhotoAction> {
+    let mut out = Vec::new();
+    if !st.open {
+        return out;
+    }
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 16.0).min(520.0);
+    let max_h = (screen.height() - safe_top - 24.0).max(240.0);
+    let mut open = true;
+    egui::Window::new(if st.picking { "Wybierz zdjęcie" } else { "Zdjęcia" })
+        .id(egui::Id::unique("photos"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top])
+        .fixed_size([width, 0.0])
+        .show(ctx, |ui| {
+            ui.set_width(width - 16.0);
+            if let Some(m) = &st.message {
+                ui.label(egui::RichText::new(m).italics());
+            }
+            if st.picking {
+                picker(ui, st, lib, max_h - 120.0, &mut out);
+                return;
+            }
+            if ui.button("Dodaj zdjęcie").clicked() {
+                out.push(PhotoAction::StartPicking);
+            }
+            if photos.is_empty() {
+                ui.label(egui::RichText::new("Dodane zdjęcie leży pod rysunkiem – możesz je odrysować.").weak());
+            }
+            for (i, p) in photos.iter().enumerate() {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(format!("Zdjęcie {}", i + 1));
+                    let mut o = p.opacity;
+                    if ui.add(egui::Slider::new(&mut o, 0.05..=1.0).show_value(false).text("krycie")).changed() {
+                        out.push(PhotoAction::Opacity(p.id, o));
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Przesuń / skaluj").clicked() {
+                        out.push(PhotoAction::Edit(p.id));
+                    }
+                    if ui.button(if p.visible { "Ukryj" } else { "Pokaż" }).clicked() {
+                        out.push(PhotoAction::ToggleVisible(p.id));
+                    }
+                    if ui.button("Usuń").clicked() {
+                        out.push(PhotoAction::Delete(p.id));
+                    }
+                });
+            }
+        });
+    if !open {
+        st.open = false;
+        st.picking = false;
+    }
+    out
+}
+
+fn picker(ui: &mut egui::Ui, st: &mut PhotoPanel, lib: Option<&mut crate::photos::PhotoLibrary>, max_h: f32, out: &mut Vec<PhotoAction>) {
+    if ui.button("Wróć").clicked() {
+        st.picking = false;
+        return;
+    }
+    let Some(lib) = lib else {
+        ui.label("Wybieranie zdjęć nie jest dostępne na tym urządzeniu.");
+        return;
+    };
+    if lib.busy {
+        ui.label("Wczytywanie zdjęcia…");
+    }
+    match &lib.entries {
+        None => {
+            ui.label("Szukam zdjęć…");
+        }
+        Some(Err(e)) => {
+            ui.label(e.as_str());
+            ui.horizontal(|ui| {
+                if ui.button("Zezwól na dostęp do zdjęć").clicked() {
+                    out.push(PhotoAction::RequestAccess);
+                }
+                if ui.button("Odśwież").clicked() {
+                    lib.refresh();
+                }
+            });
+        }
+        Some(Ok(entries)) => {
+            let entries = entries.clone();
+            let avail = ui.available_width();
+            let cols = ((avail + 6.0) / 106.0).floor().max(3.0) as usize;
+            let side = (avail - 6.0 * (cols - 1) as f32) / cols as f32;
+            egui::ScrollArea::vertical().max_height(max_h.max(200.0)).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for row in entries.chunks(cols) {
+                    ui.horizontal(|ui| {
+                        for e in row {
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), Sense::click());
+                            if ui.is_rect_visible(rect) {
+                                lib.request_thumb(&e.key);
+                            }
+                            if !st.thumbs.contains_key(&e.key)
+                                && let Some(t) = lib.thumbs.get(&e.key)
+                            {
+                                let tex = t.as_ref().map(|img| {
+                                    let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                                    ui.ctx().load_texture(format!("pick:{}", e.key), ci, egui::TextureOptions::LINEAR)
+                                });
+                                st.thumbs.insert(e.key.clone(), tex);
+                            }
+                            ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::from_gray(225));
+                            if let Some(Some(tex)) = st.thumbs.get(&e.key) {
+                                // Centre-crop to a square.
+                                let [w, h] = tex.size().map(|v| v as f32);
+                                let k = w.min(h);
+                                let uv = Rect::from_min_size(
+                                    egui::pos2((w - k) / (2.0 * w), (h - k) / (2.0 * h)),
+                                    egui::vec2(k / w, k / h),
+                                );
+                                egui::Image::new((tex.id(), rect.size())).uv(uv).corner_radius(CornerRadius::same(6)).paint_at(ui, rect);
+                            }
+                            if resp.clicked() && !lib.busy {
+                                out.push(PhotoAction::Pick(e.key.clone()));
+                            }
+                        }
+                    });
+                }
+            });
+        }
+    }
+}
+
+/// Bar shown while a photo is being moved: what the fingers do, and "done".
+pub fn image_edit_bar(ctx: &egui::Context) -> bool {
+    let mut done = false;
+    egui::Area::new(egui::Id::unique("image-edit"))
+        .anchor(Align2::CENTER_BOTTOM, [0.0, -24.0])
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Przesuń zdjęcie palcem, dwoma palcami skaluj i obracaj");
+                    done = ui.button("Gotowe").clicked();
+                });
+            });
+        });
+    done
 }
 
 /// State of the projects gallery (start screen).

@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod gestures;
+pub mod photos;
 pub mod projects;
 pub mod render;
 pub mod ui;

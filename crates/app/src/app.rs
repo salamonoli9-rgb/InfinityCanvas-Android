@@ -1,7 +1,7 @@
 //! Platform-independent application state: document, camera, tools, input → actions.
 
 use crate::gestures::{Gesture, Gestures, PointerEvent, PointerKind};
-use crate::render::{ActiveDraw, FrameInput, Renderer, Target};
+use crate::render::{ActiveDraw, FrameInput, ImageDraw, Renderer, Target};
 use crate::ui::{self, Tool, ToolState};
 use canvas_core::camera::Camera;
 use canvas_core::document::Document;
@@ -10,8 +10,11 @@ use canvas_core::io;
 use canvas_core::mesh::{Mesh, lod_for, tessellate_part};
 use canvas_core::smoothing::PointerSmoother;
 use canvas_core::stroke::{Brush, Stroke, StrokePoint};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use crate::photos::{PhotoBackend, PhotoLibrary};
 use crate::projects::Projects;
+use canvas_core::image::{ImageId, RefImage};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -100,6 +103,12 @@ pub struct CanvasApp {
     /// When the last preview was rendered (previews are refreshed now and then while drawing).
     last_thumb: Instant,
     thumb_due: bool,
+    /// Decoded reference photos (from the compressed data in the document).
+    decoded: HashMap<ImageId, Arc<image::RgbaImage>>,
+    /// Photo being moved / scaled with the fingers instead of drawing.
+    pub image_edit: Option<ImageEdit>,
+    photo_panel: ui::PhotoPanel,
+    photo_lib: Option<PhotoLibrary>,
     save_thread: Option<std::thread::JoinHandle<()>>,
     /// Set when a different document was loaded: cached meshes are keyed by stroke id.
     clear_render_cache: bool,
@@ -151,6 +160,14 @@ impl FrameStats {
     }
 }
 
+/// Moving a reference photo: gestures transform it; each gesture is one undo step.
+pub struct ImageEdit {
+    pub id: ImageId,
+    /// The photo before the current gesture.
+    before: Option<RefImage>,
+    last: Option<[f64; 2]>,
+}
+
 impl CanvasApp {
     pub fn new(save_path: Option<PathBuf>) -> Self {
         let (doc, camera) = match save_path.as_deref().map(io::load_file) {
@@ -197,6 +214,10 @@ impl CanvasApp {
             want_gallery: false,
             last_thumb: Instant::now(),
             thumb_due: false,
+            decoded: HashMap::new(),
+            image_edit: None,
+            photo_panel: ui::PhotoPanel::default(),
+            photo_lib: None,
             save_thread: None,
             clear_render_cache: false,
         }
@@ -240,6 +261,8 @@ impl CanvasApp {
         self.active = None;
         self.eraser_cursor = None;
         self.inertia = Inertia::default();
+        self.decoded.clear();
+        self.image_edit = None;
         self.save_path = path;
         self.dirty = false;
         self.clear_render_cache = true;
@@ -281,6 +304,8 @@ impl CanvasApp {
         cam.log_zoom += (w as f64 / self.viewport[0]).log2();
         let vp = [w as f64, h as f64];
         let visible = self.doc.query(&cam, vp, [0.0, 0.0, vp[0], vp[1]]);
+        self.decode_images();
+        let images = self.image_draws(&cam, vp);
         let (device, queue, format) = target.device_queue_format();
         let px = renderer.render_rgba(
             device,
@@ -291,6 +316,7 @@ impl CanvasApp {
                 visible: &visible,
                 doc: &self.doc,
                 active: None,
+                images: &images,
                 log_zoom: cam.log_zoom,
                 rotation: cam.rot(),
                 background: BACKGROUND,
@@ -364,6 +390,18 @@ impl CanvasApp {
     /// Returns whether it was handled (otherwise the app may close).
     pub fn back(&mut self) -> bool {
         self.wants_redraw = true;
+        if self.image_edit.is_some() {
+            self.finish_image_edit();
+            return true;
+        }
+        if self.photo_panel.open {
+            if self.photo_panel.picking {
+                self.photo_panel.picking = false;
+            } else {
+                self.photo_panel.open = false;
+            }
+            return true;
+        }
         match self.screen {
             Screen::Canvas if self.projects.is_some() => {
                 self.want_gallery = true;
@@ -439,8 +477,172 @@ impl CanvasApp {
         }
     }
 
+    /// Where photos can be picked from (set by the platform launcher).
+    pub fn set_photo_backend(&mut self, backend: Box<dyn PhotoBackend>) {
+        self.photo_lib = Some(PhotoLibrary::new(backend));
+    }
+
+    /// Adds a photo (file bytes) centred on the screen and starts moving it.
+    pub fn add_photo(&mut self, bytes: &[u8]) -> Result<ImageId, String> {
+        let p = crate::photos::prepare(bytes).ok_or("Nie udało się odczytać zdjęcia")?;
+        let pixels = [p.rgba.width(), p.rgba.height()];
+        let img = RefImage::place(self.doc.alloc_id(), &self.camera, self.viewport, pixels, Arc::new(p.encoded), 0.8);
+        let id = img.id;
+        self.decoded.insert(id, Arc::new(p.rgba));
+        self.history.apply(&mut self.doc, Action::Image { before: None, after: Some(img) });
+        self.image_edit = Some(ImageEdit { id, before: None, last: None });
+        self.changed();
+        Ok(id)
+    }
+
+    /// Decodes photos that aren't decoded yet (after loading a project, undo of a delete…).
+    fn decode_images(&mut self) {
+        let missing: Vec<(ImageId, Arc<Vec<u8>>)> =
+            self.doc.images().filter(|i| !self.decoded.contains_key(&i.id)).map(|i| (i.id, i.data.clone())).collect();
+        for (id, data) in missing {
+            let rgba = crate::photos::decode(&data).map(|d| d.to_rgba8()).unwrap_or_else(|| {
+                log::warn!("photo {id} could not be decoded");
+                image::RgbaImage::from_pixel(1, 1, image::Rgba([200, 200, 200, 255]))
+            });
+            self.decoded.insert(id, Arc::new(rgba));
+        }
+    }
+
+    fn image_draws(&self, cam: &Camera, vp: [f64; 2]) -> Vec<ImageDraw<'_>> {
+        self.doc
+            .images()
+            .filter(|i| i.visible)
+            .filter_map(|i| {
+                Some(ImageDraw { id: i.id, corners: i.screen_corners(cam, vp), opacity: i.opacity, rgba: self.decoded.get(&i.id)? })
+            })
+            .collect()
+    }
+
+    fn begin_image_change(&mut self) {
+        if let Some(e) = self.image_edit.as_mut()
+            && e.before.is_none()
+        {
+            e.before = self.doc.image(e.id).cloned();
+        }
+    }
+
+    fn commit_image_change(&mut self) {
+        let Some(e) = self.image_edit.as_mut() else { return };
+        e.last = None;
+        let Some(before) = e.before.take() else { return };
+        let after = self.doc.image(e.id).cloned();
+        if after.as_ref() != Some(&before) {
+            self.history.record(Action::Image { before: Some(before), after });
+            self.changed();
+        }
+    }
+
+    /// Applies a transform to the photo being edited.
+    fn edit_image(&mut self, f: impl FnOnce(&mut RefImage, &Camera, [f64; 2])) {
+        self.begin_image_change();
+        let Some(id) = self.image_edit.as_ref().map(|e| e.id) else { return };
+        let (cam, vp) = (self.camera.clone(), self.viewport);
+        if let Some(img) = self.doc.image_mut(id) {
+            f(img, &cam, vp);
+        } else {
+            self.image_edit = None;
+        }
+        self.wants_redraw = true;
+    }
+
+    /// Gestures while a photo is being edited move / scale / rotate it instead of the view.
+    fn apply_to_image(&mut self, g: Gesture) {
+        match g {
+            Gesture::StrokeBegin { pos, .. } => {
+                self.begin_image_change();
+                if let Some(e) = self.image_edit.as_mut() {
+                    e.last = Some(pos);
+                }
+            }
+            Gesture::StrokeMove { pos, .. } => {
+                let Some(last) = self.image_edit.as_ref().and_then(|e| e.last) else { return };
+                if let Some(e) = self.image_edit.as_mut() {
+                    e.last = Some(pos);
+                }
+                self.edit_image(|img, cam, vp| img.pan(cam, vp, [pos[0] - last[0], pos[1] - last[1]]));
+            }
+            Gesture::StrokeEnd | Gesture::PinchEnd { .. } => self.commit_image_change(),
+            Gesture::StrokeCancel => {
+                if let Some(e) = self.image_edit.as_mut() {
+                    e.last = None;
+                }
+            }
+            Gesture::Pan { delta } => self.edit_image(|img, cam, vp| img.pan(cam, vp, delta)),
+            Gesture::Zoom { center, dlog } => self.edit_image(|img, cam, vp| img.zoom_at(cam, vp, center, dlog)),
+            Gesture::Rotate { center, angle } => self.edit_image(|img, cam, vp| img.rotate_at(cam, vp, center, angle)),
+            Gesture::Fling { .. } | Gesture::Stop => {}
+        }
+    }
+
+    fn finish_image_edit(&mut self) {
+        self.commit_image_change();
+        self.image_edit = None;
+        self.wants_redraw = true;
+    }
+
+    fn photo_action(&mut self, a: ui::PhotoAction) {
+        use ui::PhotoAction::*;
+        match a {
+            StartPicking => {
+                self.photo_panel.picking = true;
+                self.photo_panel.message = None;
+                if let Some(lib) = self.photo_lib.as_mut() {
+                    lib.refresh();
+                }
+            }
+            RequestAccess => {
+                if let Some(lib) = self.photo_lib.as_mut() {
+                    lib.request_access();
+                    lib.entries = None;
+                }
+            }
+            Pick(key) => {
+                if let Some(lib) = self.photo_lib.as_mut() {
+                    lib.load(&key);
+                }
+            }
+            Opacity(id, o) => {
+                if let Some(img) = self.doc.image_mut(id) {
+                    img.opacity = o;
+                    self.changed();
+                }
+            }
+            ToggleVisible(id) => {
+                if let Some(img) = self.doc.image(id).cloned() {
+                    let mut after = img.clone();
+                    after.visible = !after.visible;
+                    self.history.apply(&mut self.doc, Action::Image { before: Some(img), after: Some(after) });
+                    self.changed();
+                }
+            }
+            Delete(id) => {
+                if let Some(img) = self.doc.image(id).cloned() {
+                    self.history.apply(&mut self.doc, Action::Image { before: Some(img), after: None });
+                    if self.image_edit.as_ref().is_some_and(|e| e.id == id) {
+                        self.image_edit = None;
+                    }
+                    self.changed();
+                }
+            }
+            Edit(id) => {
+                self.image_edit = Some(ImageEdit { id, before: None, last: None });
+                self.photo_panel.open = false;
+            }
+        }
+    }
+
     /// Mouse wheel / touchpad zoom by `dlog` binary orders of magnitude around `pos`.
     pub fn wheel_zoom(&mut self, pos: [f64; 2], dlog: f64) {
+        if self.image_edit.is_some() {
+            self.edit_image(|img, cam, vp| img.zoom_at(cam, vp, pos, dlog));
+            self.commit_image_change();
+            return;
+        }
         self.inertia = Inertia::default();
         self.camera.zoom_at(pos, self.viewport, dlog);
         self.wants_redraw = true;
@@ -448,6 +650,11 @@ impl CanvasApp {
 
     /// Rotates the view by `angle` radians around `pos` (desktop: Alt + wheel).
     pub fn wheel_rotate(&mut self, pos: [f64; 2], angle: f64) {
+        if self.image_edit.is_some() {
+            self.edit_image(|img, cam, vp| img.rotate_at(cam, vp, pos, angle));
+            self.commit_image_change();
+            return;
+        }
         self.inertia = Inertia::default();
         self.camera.rotate_at(pos, self.viewport, angle);
         if self.camera.rotation.abs() < 1e-9 {
@@ -471,6 +678,10 @@ impl CanvasApp {
     }
 
     fn apply(&mut self, g: Gesture, kind: PointerKind) {
+        if self.image_edit.is_some() {
+            self.apply_to_image(g);
+            return;
+        }
         match g {
             Gesture::StrokeBegin { pos, pressure, time, erase } => {
                 let eraser = erase || self.tools.tool == Tool::Eraser;
@@ -701,7 +912,10 @@ impl CanvasApp {
         };
         let mut actions = ui::Actions::default();
         let mut gallery_actions = Vec::new();
+        let mut photo_actions = Vec::new();
+        let mut finish_edit = false;
         let mut rects = Vec::new();
+        let lib_busy = self.photo_lib.as_mut().is_some_and(|l| l.poll());
         let ctx = self.egui_ctx.clone();
         let output = ctx.run_ui(raw_input, |ui| {
             if self.screen == Screen::Gallery {
@@ -717,7 +931,19 @@ impl CanvasApp {
                 rects.push(egui::Rect::EVERYTHING);
                 return;
             }
-            let (a, r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
+            let (a, mut r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
+            let photos: Vec<ui::PhotoInfo> =
+                self.doc.images().map(|i| ui::PhotoInfo { id: i.id, opacity: i.opacity, visible: i.visible }).collect();
+            photo_actions = ui::photos_window(ui.ctx(), &mut self.photo_panel, &photos, self.photo_lib.as_mut(), self.safe_top);
+            if self.photo_panel.open {
+                r.push(egui::Rect::EVERYTHING);
+            }
+            if self.image_edit.is_some() && ui::image_edit_bar(ui.ctx()) {
+                finish_edit = true;
+            }
+            if ui.ctx().is_pointer_over_egui() {
+                r.push(egui::Rect::EVERYTHING);
+            }
             actions = a;
             rects = r;
             if let Some(pos) = self.eraser_cursor {
@@ -749,6 +975,26 @@ impl CanvasApp {
         for a in gallery_actions {
             self.gallery_action(a);
         }
+        for a in photo_actions {
+            self.photo_action(a);
+        }
+        if actions.photos {
+            self.photo_panel.open = !self.photo_panel.open;
+            self.photo_panel.picking = false;
+        }
+        if finish_edit {
+            self.finish_image_edit();
+        }
+        if let Some((_, bytes)) = self.photo_lib.as_mut().and_then(|l| l.loaded.take()) {
+            match bytes.as_deref().map(|b| self.add_photo(b)) {
+                Some(Ok(_)) => {
+                    self.photo_panel.open = false;
+                    self.photo_panel.picking = false;
+                }
+                Some(Err(e)) => self.photo_panel.message = Some(e),
+                None => self.photo_panel.message = Some("Nie udało się wczytać zdjęcia".into()),
+            }
+        }
         if std::mem::take(&mut self.clear_render_cache) {
             renderer.clear_cache();
         }
@@ -759,6 +1005,7 @@ impl CanvasApp {
         }
 
         // Scene.
+        self.decode_images();
         let full = [0.0, 0.0, self.viewport[0], self.viewport[1]];
         let tq = Instant::now();
         let visible = self.doc.query(&self.camera, self.viewport, full);
@@ -773,6 +1020,7 @@ impl CanvasApp {
                 tail_from: a.frozen_upto,
             }
         });
+        let images = if self.screen == Screen::Canvas { self.image_draws(&self.camera, self.viewport) } else { Vec::new() };
         let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
         renderer.render_target(
             target,
@@ -780,6 +1028,7 @@ impl CanvasApp {
                 visible: &visible,
                 doc: &self.doc,
                 active,
+                images: &images,
                 log_zoom: self.camera.log_zoom,
                 rotation: self.camera.rot(),
                 background: BACKGROUND,
@@ -789,7 +1038,7 @@ impl CanvasApp {
         );
         self.stats.record(now.elapsed().as_secs_f64(), visible.len(), query_time, renderer.timings);
         let egui_repaint = output.viewport_output.values().any(|v| v.repaint_delay.is_zero());
-        self.wants_redraw |= renderer.needs_another_frame || egui_repaint || self.inertia.active();
+        self.wants_redraw |= renderer.needs_another_frame || egui_repaint || self.inertia.active() || lib_busy;
         output.platform_output
     }
 }

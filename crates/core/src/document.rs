@@ -1,6 +1,7 @@
 //! The drawing: strokes plus a multi-resolution spatial hash per scale level.
 
 use crate::camera::{Camera, LevelFrame};
+use crate::image::{ImageId, RefImage};
 use crate::stroke::{Stroke, StrokeId};
 use num_bigint::BigInt;
 use num_traits::One;
@@ -113,6 +114,8 @@ pub struct VisibleStroke {
 #[derive(Default, Debug)]
 pub struct Document {
     strokes: BTreeMap<StrokeId, Stroke>,
+    /// Reference photos, always drawn below the strokes (in id order).
+    images: BTreeMap<ImageId, RefImage>,
     levels: BTreeMap<i32, LevelIndex>,
     next_id: StrokeId,
 }
@@ -130,6 +133,27 @@ impl Document {
             d.insert(s);
         }
         d
+    }
+
+    pub fn images(&self) -> impl Iterator<Item = &RefImage> {
+        self.images.values()
+    }
+
+    pub fn image(&self, id: ImageId) -> Option<&RefImage> {
+        self.images.get(&id)
+    }
+
+    pub fn image_mut(&mut self, id: ImageId) -> Option<&mut RefImage> {
+        self.images.get_mut(&id)
+    }
+
+    pub fn insert_image(&mut self, img: RefImage) {
+        self.next_id = self.next_id.max(img.id + 1);
+        self.images.insert(img.id, img);
+    }
+
+    pub fn remove_image(&mut self, id: ImageId) -> Option<RefImage> {
+        self.images.remove(&id)
     }
 
     pub fn alloc_id(&mut self) -> StrokeId {

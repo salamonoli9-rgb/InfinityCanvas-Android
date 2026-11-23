@@ -1,6 +1,7 @@
 //! Undo / redo as a stack of reversible actions.
 
 use crate::document::Document;
+use crate::image::RefImage;
 use crate::stroke::Stroke;
 
 #[derive(Clone, Debug)]
@@ -9,6 +10,8 @@ pub enum Action {
     Remove(Vec<Stroke>),
     /// Strokes replaced by others (e.g. cut by the eraser).
     Replace { removed: Vec<Stroke>, added: Vec<Stroke> },
+    /// A reference image added (`before` = None), removed (`after` = None) or changed.
+    Image { before: Option<RefImage>, after: Option<RefImage> },
 }
 
 impl Action {
@@ -24,6 +27,14 @@ impl Action {
                 });
                 added.iter().for_each(|s| doc.insert(s.clone()));
             }
+            Action::Image { before, after } => {
+                if let Some(b) = before {
+                    doc.remove_image(b.id);
+                }
+                if let Some(a) = after {
+                    doc.insert_image(a.clone());
+                }
+            }
         }
     }
 
@@ -32,6 +43,7 @@ impl Action {
             Action::Add(v) => Action::Remove(v.clone()),
             Action::Remove(v) => Action::Add(v.clone()),
             Action::Replace { removed, added } => Action::Replace { removed: added.clone(), added: removed.clone() },
+            Action::Image { before, after } => Action::Image { before: after.clone(), after: before.clone() },
         }
     }
 }

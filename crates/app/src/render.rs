@@ -172,6 +172,29 @@ impl Target<'_> {
     }
 }
 
+/// One reference photo for this frame.
+pub struct ImageDraw<'a> {
+    pub id: u64,
+    /// Screen corners for texture coordinates (0,0), (1,0), (1,1), (0,1).
+    pub corners: [[f64; 2]; 4],
+    pub opacity: f32,
+    /// Decoded pixels (used once to create the texture).
+    pub rgba: &'a image::RgbaImage,
+}
+
+struct ImageTexture {
+    bind_group: wgpu::BindGroup,
+    last_used: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ImageVertex {
+    pos: [f32; 2],
+    uv: [f32; 2],
+    opacity: f32,
+}
+
 /// The stroke in progress: already tessellated parts plus the points after them.
 pub struct ActiveDraw<'a> {
     pub stroke: &'a Stroke,
@@ -188,6 +211,8 @@ pub struct FrameInput<'a> {
     pub doc: &'a canvas_core::document::Document,
     /// Stroke being drawn right now (not in the document yet) with its transform.
     pub active: Option<ActiveDraw<'a>>,
+    /// Reference photos to draw below the strokes, bottom first.
+    pub images: &'a [ImageDraw<'a>],
     pub log_zoom: f64,
     /// (cos, sin) of the view rotation.
     pub rotation: [f64; 2],
@@ -221,6 +246,12 @@ pub struct Renderer {
     pipeline_erase: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
+    image_pipeline: wgpu::RenderPipeline,
+    image_bgl: wgpu::BindGroupLayout,
+    image_sampler: wgpu::Sampler,
+    image_textures: HashMap<u64, ImageTexture>,
+    image_vbuf: wgpu::Buffer,
+    image_v_cap: u64,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     targets: Option<Targets>,
@@ -394,6 +425,72 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("image"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("image.wgsl").into()),
+        });
+        let image_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("image pl"),
+            bind_group_layouts: &[Some(&bgl), Some(&image_bgl)],
+            ..Default::default()
+        });
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("image"),
+            layout: Some(&image_layout),
+            vertex: wgpu::VertexState {
+                module: &image_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ImageVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32],
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &image_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         // egui is drawn in the (single-sampled) screen pass; it antialiases by itself.
         let egui = egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions { msaa_samples: 1, ..Default::default() });
         let mk = |label, size, usage| {
@@ -407,6 +504,12 @@ impl Renderer {
             pipeline_erase,
             composite_pipeline,
             composite_bgl,
+            image_pipeline,
+            image_bgl,
+            image_sampler,
+            image_textures: HashMap::new(),
+            image_vbuf: mk("image v", 256 * std::mem::size_of::<ImageVertex>() as u64, vu),
+            image_v_cap: 256,
             uniform_buf,
             bind_group,
             targets: None,
@@ -436,6 +539,51 @@ impl Renderer {
         let a = c[3] as f32 / 255.0;
         // Premultiplied alpha.
         [conv(c[0]) * a, conv(c[1]) * a, conv(c[2]) * a, a]
+    }
+
+    /// Uploads a photo with a full mip chain (so it doesn't shimmer when zoomed out).
+    fn create_image_texture(&self, device: &wgpu::Device, queue: &wgpu::Queue, rgba: &image::RgbaImage) -> wgpu::BindGroup {
+        let max = device.limits().max_texture_dimension_2d;
+        let mut level = if rgba.width() > max || rgba.height() > max {
+            let k = max as f32 / rgba.width().max(rgba.height()) as f32;
+            image::imageops::resize(rgba, ((rgba.width() as f32 * k) as u32).max(1), ((rgba.height() as f32 * k) as u32).max(1), image::imageops::FilterType::Triangle)
+        } else {
+            rgba.clone()
+        };
+        let (w, h) = level.dimensions();
+        let mips = 32 - w.max(h).leading_zeros();
+        let format = if self.srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("photo"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for mip in 0..mips {
+            let (lw, lh) = level.dimensions();
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: mip, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                level.as_raw(),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(lw * 4), rows_per_image: Some(lh) },
+                wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+            );
+            if mip + 1 < mips {
+                level = image::imageops::resize(&level, (lw / 2).max(1), (lh / 2).max(1), image::imageops::FilterType::Triangle);
+            }
+        }
+        let view = tex.create_view(&Default::default());
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("photo"),
+            layout: &self.image_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.image_sampler) },
+            ],
+        })
     }
 
     /// Instance colour, grain parameters and how to draw it. Erasers draw with alpha 1 and
@@ -503,6 +651,7 @@ impl Renderer {
 
     fn evict(&mut self) {
         let frame = self.frame;
+        self.image_textures.retain(|_, t| frame - t.last_used < EVICT_FRAMES);
         let chunks = &mut self.chunks;
         self.meshes.retain(|_, m| {
             let keep = frame - m.last_used < EVICT_FRAMES;
@@ -522,6 +671,7 @@ impl Renderer {
 
     /// Forget every cached mesh of a stroke (e.g. after it changed).
     pub fn clear_cache(&mut self) {
+        self.image_textures.clear();
         self.meshes.clear();
         self.cpu_meshes.clear();
         for c in &mut self.chunks {
@@ -763,6 +913,38 @@ impl Renderer {
         }
 
         self.timings.active = t_active.elapsed().as_secs_f64();
+
+        // Photos: corners in f64, clipped to a guard band, then f32 (exact at any zoom).
+        let mut image_v: Vec<ImageVertex> = Vec::new();
+        let mut image_draws: Vec<(u64, u32, u32)> = Vec::new();
+        let guard = [-vp[0], -vp[1], 2.0 * vp[0], 2.0 * vp[1]];
+        for img in input.images {
+            let c = img.corners;
+            let (x0, x1) = (c.iter().map(|p| p[0]).fold(f64::MAX, f64::min), c.iter().map(|p| p[0]).fold(f64::MIN, f64::max));
+            let (y0, y1) = (c.iter().map(|p| p[1]).fold(f64::MAX, f64::min), c.iter().map(|p| p[1]).fold(f64::MIN, f64::max));
+            if x1 < 0.0 || y1 < 0.0 || x0 > vp[0] || y0 > vp[1] || (x1 - x0) * (y1 - y0) < 1.0 || img.opacity <= 0.0 {
+                continue;
+            }
+            let quad = [[c[0][0], c[0][1], 0.0, 0.0], [c[1][0], c[1][1], 1.0, 0.0], [c[2][0], c[2][1], 1.0, 1.0], [c[3][0], c[3][1], 0.0, 1.0]];
+            let poly = clip_polygon4(&quad, guard);
+            if poly.len() < 3 {
+                continue;
+            }
+            if !self.image_textures.contains_key(&img.id) {
+                let bind_group = self.create_image_texture(device, queue, img.rgba);
+                self.image_textures.insert(img.id, ImageTexture { bind_group, last_used: self.frame });
+            }
+            if let Some(t) = self.image_textures.get_mut(&img.id) {
+                t.last_used = self.frame;
+            }
+            let first = image_v.len() as u32;
+            for k in 1..poly.len() - 1 {
+                for q in [poly[0], poly[k], poly[k + 1]] {
+                    image_v.push(ImageVertex { pos: [q[0] as f32, q[1] as f32], uv: [q[2] as f32, q[3] as f32], opacity: img.opacity });
+                }
+            }
+            image_draws.push((img.id, first, image_v.len() as u32));
+        }
         // Upload per-frame data, growing buffers when needed.
         let grow = |buf: &mut wgpu::Buffer, cap: &mut u64, need: u64, elem: u64, usage, label| {
             if need > *cap {
@@ -779,6 +961,10 @@ impl Renderer {
         let iu = wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST;
         grow(&mut self.instance_buf, &mut self.instance_cap, instances.len() as u64, std::mem::size_of::<Instance>() as u64, vu, "instances");
         grow(&mut self.dyn_vbuf, &mut self.dyn_v_cap, dyn_v.len() as u64, VERTEX_SIZE, vu, "dyn v");
+        grow(&mut self.image_vbuf, &mut self.image_v_cap, image_v.len() as u64, std::mem::size_of::<ImageVertex>() as u64, vu, "image v");
+        if !image_v.is_empty() {
+            queue.write_buffer(&self.image_vbuf, 0, bytemuck::cast_slice(&image_v));
+        }
         grow(&mut self.dyn_ibuf, &mut self.dyn_i_cap, dyn_i.len() as u64, 4, iu, "dyn i");
         if !instances.is_empty() {
             queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances));
@@ -926,6 +1112,15 @@ impl Renderer {
                     ..Default::default()
                 })
                 .forget_lifetime();
+            if !image_draws.is_empty() {
+                pass.set_pipeline(&self.image_pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.image_vbuf.slice(..));
+                for (id, a, b) in &image_draws {
+                    pass.set_bind_group(1, &self.image_textures[id].bind_group, &[]);
+                    pass.draw(*a..*b, 0..1);
+                }
+            }
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, &targets.composite, &[]);
             pass.draw(0..3, 0..1);
@@ -982,6 +1177,31 @@ fn push_cpu_path(
             out_i.extend_from_slice(&[first, first + k, first + k + 1]);
         }
     }
+}
+
+/// [`clip_polygon`] for vertices with two attributes (x, y, u, v).
+fn clip_polygon4(poly: &[[f64; 4]], r: [f64; 4]) -> Vec<[f64; 4]> {
+    let mut out = poly.to_vec();
+    for (axis, bound, greater) in [(0, r[0], true), (0, r[2], false), (1, r[1], true), (1, r[3], false)] {
+        if out.is_empty() {
+            break;
+        }
+        let input = std::mem::take(&mut out);
+        let ins = |p: &[f64; 4]| if greater { p[axis] >= bound } else { p[axis] <= bound };
+        for i in 0..input.len() {
+            let a = input[i];
+            let b = input[(i + 1) % input.len()];
+            let (ia, ib) = (ins(&a), ins(&b));
+            if ia {
+                out.push(a);
+            }
+            if ia != ib {
+                let t = (bound - a[axis]) / (b[axis] - a[axis]);
+                out.push(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t));
+            }
+        }
+    }
+    out
 }
 
 /// Sutherland–Hodgman clipping of a convex polygon against an axis-aligned rectangle
