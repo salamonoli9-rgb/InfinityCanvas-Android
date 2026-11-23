@@ -241,6 +241,7 @@ struct ImageVertex {
 }
 
 /// The stroke in progress: already tessellated parts plus the points after them.
+#[derive(Clone)]
 pub struct ActiveDraw<'a> {
     pub stroke: &'a Stroke,
     /// Position of its layer.

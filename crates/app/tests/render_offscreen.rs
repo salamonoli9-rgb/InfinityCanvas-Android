@@ -1090,3 +1090,73 @@ fn every_brush_sample_has_ink() {
         sheet.save(path).unwrap();
     }
 }
+
+#[test]
+fn recording_the_canvas() {
+    if std::process::Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("no ffmpeg: skipping");
+        return;
+    }
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("icnv-rec-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = new_app();
+    app.set_video_factory(infinite_canvas::video::ffmpeg_factory_in(dir.clone()));
+    app.toggle_recording();
+    assert!(app.recording());
+    let start = std::time::Instant::now();
+    // Draw slowly for about a second, with frames in between.
+    mouse(&mut app, Phase::Down, [100.0, 200.0], 0.0);
+    for i in 1..=30 {
+        mouse(&mut app, Phase::Move, [100.0 + i as f64 * 15.0, 200.0], i as f64 * 0.033);
+        gpu.frame_once(&mut app);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    mouse(&mut app, Phase::Up, [550.0, 200.0], 1.0);
+    for _ in 0..5 {
+        gpu.frame_once(&mut app);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    app.toggle_recording();
+    assert!(!app.recording());
+    let t = std::time::Instant::now();
+    let file = loop {
+        gpu.frame_once(&mut app);
+        let f = std::fs::read_dir(&dir).ok().and_then(|d| d.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "mp4")));
+        if let Some(f) = f
+            && std::process::Command::new("ffprobe").arg("-v").arg("error").arg(&f).status().is_ok_and(|s| s.success())
+        {
+            break f;
+        }
+        assert!(t.elapsed().as_secs() < 30, "no video");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let probe = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames,width", "-of", "csv=p=0"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    let parts: Vec<&str> = info.split(',').collect();
+    let frames: f64 = parts[1].parse().unwrap();
+    eprintln!("recorded {elapsed:.2} s → {info}");
+    assert_eq!(parts[0], "768");
+    assert!((frames / 30.0 - elapsed).abs() < 0.3, "duration matches real time: {} vs {elapsed}", frames / 30.0);
+    // The last frame shows the line (y = 200 on screen → ×1.0 here since 768 = screen width).
+    let png = dir.join("last.png");
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-sseof", "-0.1", "-i"])
+        .arg(&file)
+        .args(["-frames:v", "1"])
+        .arg(&png)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let img = image::open(&png).unwrap().to_rgba8();
+    assert!(img.get_pixel(300, 200).0[0] < 100, "line in the last frame");
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -136,6 +136,9 @@ pub struct CanvasApp {
     video_factory: Option<crate::video::VideoFactory>,
     /// Video export in progress.
     video: Option<VideoExport>,
+    /// Screen recording in progress, and a finished one being written.
+    recording: Option<Recording>,
+    recording_saving: Option<crate::video::VideoJob>,
     /// Selected strokes (Select tool) and what the finger is doing with them.
     selection: Vec<canvas_core::stroke::StrokeId>,
     sel_drag: Option<SelDrag>,
@@ -225,6 +228,18 @@ impl SelDrag {
 
 /// Size of the selection's scale handle (logical points).
 const SELECTION_HANDLE: f64 = 28.0;
+
+/// Recording the canvas: frames at a fixed rate, the last one repeated while nothing changes.
+struct Recording {
+    job: crate::video::VideoJob,
+    start: Instant,
+    /// Frames written so far.
+    written: u64,
+    size: [u32; 2],
+    /// Video px per screen px.
+    k: f64,
+    last: Vec<u8>,
+}
 
 struct VideoExport {
     cams: Vec<Camera>,
@@ -390,6 +405,8 @@ impl CanvasApp {
             sel_drag: None,
             video_factory: None,
             video: None,
+            recording: None,
+            recording_saving: None,
             cache: None,
             last_cam: None,
             last_move: Instant::now(),
@@ -463,6 +480,9 @@ impl CanvasApp {
 
     /// Saves the open project, renders its preview and shows the gallery.
     fn leave_to_gallery(&mut self, target: Target, renderer: &mut Renderer) {
+        if self.recording.is_some() {
+            self.toggle_recording();
+        }
         self.render_thumbnail(target, renderer, false);
         self.load_document(None);
         self.gallery.thumbs.remove(&self.project);
@@ -1011,6 +1031,39 @@ impl CanvasApp {
         self.video = Some(VideoExport { cams, next: 0, size, job, finishing: false });
         self.bookmark_panel.open = false;
         self.wants_redraw = true;
+    }
+
+    /// Starts or stops recording the canvas to a video.
+    pub fn toggle_recording(&mut self) {
+        if let Some(mut rec) = self.recording.take() {
+            // Fill up to now with the last frame, then close the file.
+            let due = (rec.start.elapsed().as_secs_f64() * crate::video::FPS as f64) as u64 + 1;
+            let last = std::mem::take(&mut rec.last);
+            if !last.is_empty() {
+                for _ in rec.written..due.min(rec.written + 600) {
+                    rec.job.push(last.clone());
+                }
+            }
+            rec.job.finish();
+            self.recording_saving = Some(rec.job);
+            self.toast = Some(("Zapisywanie nagrania…".into(), Instant::now()));
+            return;
+        }
+        let Some(factory) = self.video_factory.clone() else {
+            self.toast = Some(("Nagrywanie nie jest dostępne na tym urządzeniu".into(), Instant::now()));
+            return;
+        };
+        let size = crate::video::size_for(self.viewport);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let base = if self.project.is_empty() { "rysunek".to_string() } else { self.project.clone() };
+        let job = crate::video::VideoJob::start(factory, format!("{base}-nagranie-{stamp}"), size);
+        self.recording = Some(Recording { job, start: Instant::now(), written: 0, size, k: size[0] as f64 / self.viewport[0], last: Vec::new() });
+        self.wants_redraw = true;
+    }
+
+    /// Whether the canvas is being recorded.
+    pub fn recording(&self) -> bool {
+        self.recording.is_some()
     }
 
     /// Whether a video is being exported.
@@ -1785,6 +1838,7 @@ impl CanvasApp {
         let mut layer_actions = Vec::new();
         let mut finish_edit = false;
         let mut sel_action = None;
+        let mut stop_recording = false;
         let mut toast_visible = false;
         let mut rects = Vec::new();
         let lib_busy = self.photo_lib.as_mut().is_some_and(|l| l.poll());
@@ -1843,6 +1897,11 @@ impl CanvasApp {
             }
             if self.video.is_some() {
                 r.push(egui::Rect::EVERYTHING);
+            }
+            if let Some(rec) = &self.recording {
+                let (stop, rect) = ui::recording_badge(ui.ctx(), rec.start.elapsed().as_secs_f64(), self.safe_top);
+                stop_recording = stop;
+                r.push(rect);
             }
             if self.tools.tool != Tool::Select {
                 self.selection.clear();
@@ -1920,6 +1979,19 @@ impl CanvasApp {
         if actions.bookmarks {
             self.bookmark_panel.open = !self.bookmark_panel.open;
             self.photo_panel.open = false;
+        }
+        if actions.record || stop_recording {
+            self.toggle_recording();
+        }
+        if let Some(r) = self.recording_saving.as_ref().and_then(|j| j.poll()) {
+            self.recording_saving = None;
+            self.toast = Some((
+                match r {
+                    Ok(place) => format!("Zapisano nagranie: {place}"),
+                    Err(e) => format!("Nagranie nie powstało: {e}"),
+                },
+                Instant::now(),
+            ));
         }
         if actions.export {
             self.pending_export = true;
@@ -2099,6 +2171,7 @@ impl CanvasApp {
                 predicted,
             }
         });
+        let capture_active = active.clone();
         let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
         renderer.render_target(
             target,
@@ -2117,6 +2190,54 @@ impl CanvasApp {
                 textures: output.textures_delta,
             },
         );
+        // Recording: the same picture (cached scene + stroke in progress) at video size, no UI.
+        if let Some(rec) = self.recording.as_mut()
+            && canvas
+        {
+            let due = (rec.start.elapsed().as_secs_f64() * crate::video::FPS as f64) as u64 + 1;
+            if due > rec.written {
+                let k = rec.k;
+                let active = capture_active.map(|mut a| {
+                    a.offset = [a.offset[0] * k, a.offset[1] * k];
+                    a.scale *= k;
+                    a.predicted = None;
+                    a
+                });
+                let px = renderer.render_rgba(
+                    device,
+                    queue,
+                    format,
+                    rec.size,
+                    FrameInput {
+                        visible: &[],
+                        doc: &self.doc,
+                        active,
+                        scene: scene.map(|c| c.map(|p| [p[0] * k, p[1] * k])),
+                        images: &[],
+                        layer_opacity: &layer_opacity,
+                        urgent: &[],
+                        log_zoom: self.camera.log_zoom + k.log2(),
+                        rotation: self.camera.rot(),
+                        background: BACKGROUND,
+                        egui: None,
+                        textures: Default::default(),
+                    },
+                );
+                // Frames missed while nothing was redrawn repeat the previous picture.
+                if !rec.last.is_empty() {
+                    for _ in rec.written..(due - 1).min(rec.written + 600) {
+                        rec.job.push(rec.last.clone());
+                    }
+                }
+                if !rec.job.push(px.clone()) {
+                    self.toast = Some(("Nagrywanie przerwane: błąd kodera".into(), Instant::now()));
+                }
+                rec.last = px;
+                rec.written = due;
+            }
+            // Keep the clock in the badge ticking.
+            self.wants_redraw = true;
+        }
         self.stats.record(now.elapsed().as_secs_f64(), visible_count, query_time, renderer.timings);
         if incomplete || (canvas && moving) {
             // Keep going: missing meshes are on their way / the sharp frame follows the gesture.

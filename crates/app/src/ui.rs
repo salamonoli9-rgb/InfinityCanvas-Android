@@ -122,6 +122,8 @@ pub struct Actions {
     pub bookmarks: bool,
     /// Open the layers window.
     pub layers: bool,
+    /// Start / stop recording a video of the canvas.
+    pub record: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -246,6 +248,10 @@ fn photos_button(ui: &mut egui::Ui, a: &mut Actions) {
         }
         if ui.button("Eksport do PNG").clicked() {
             a.export = true;
+            ui.close();
+        }
+        if ui.button("Nagrywaj wideo (MP4)").on_hover_text("Nagrywa płótno – rysowanie, przesuwanie, zoom – bez paska narzędzi").clicked() {
+            a.record = true;
             ui.close();
         }
     });
@@ -874,6 +880,17 @@ pub fn selection_bar(ctx: &egui::Context, count: usize) -> (Option<SelectionActi
         });
     });
     (out, r.response.rect)
+}
+
+/// While recording: a red button with the time; tapping it stops the recording.
+pub fn recording_badge(ctx: &egui::Context, seconds: f64, safe_top: f32) -> (bool, Rect) {
+    let mut stop = false;
+    let r = egui::Area::new(egui::Id::unique("recording")).anchor(Align2::RIGHT_TOP, [-8.0, 8.0 + safe_top]).show(ctx, |ui| {
+        let s = seconds as u64;
+        let text = egui::RichText::new(format!("● Nagrywanie {}:{:02} – zakończ", s / 60, s % 60)).color(Color32::WHITE).strong();
+        stop = ui.add(egui::Button::new(text).fill(Color32::from_rgb(0xd3, 0x2f, 0x2f))).clicked();
+    });
+    (stop, r.response.rect)
 }
 
 /// A short message near the bottom of the screen.

@@ -148,6 +148,12 @@ na każdej, płynny lot między nimi), 768 px szerokości, 30 kl./s, proporcje e
 kodowany sprzętowo (MediaCodec H.264) i zapisywany w galerii (Filmy → „Nieskończone płótno”), na
 komputerze przez `ffmpeg` do `~/Wideo/Nieskończone płótno/`. Postęp widać na dole; „Wstecz” anuluje.
 
+### Nagrywanie
+
+**Więcej → Nagrywaj wideo (MP4)** nagrywa płótno (rysowanie, przesuwanie, zoom – bez paska narzędzi
+i okien), 30 kl./s, 768 px szerokości. Czerwony przycisk w prawym górnym rogu pokazuje czas;
+stuknięcie kończy nagrywanie. Film trafia tam, gdzie wideo z zakładek (galeria → Filmy).
+
 ### Eksport
 
 **Więcej → Eksport do PNG** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej
