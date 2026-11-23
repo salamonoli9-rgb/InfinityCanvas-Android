@@ -69,10 +69,12 @@ impl PointerSmoother {
     }
 }
 
-/// Centripetal-free uniform Catmull-Rom subdivision of a polyline.
+/// Uniform Catmull-Rom subdivision of a polyline.
 ///
-/// `segments_for(len)` decides how many pieces each input segment becomes.
-pub fn catmull_rom(points: &[StrokePoint], segments_for: impl Fn(f32) -> usize) -> Vec<StrokePoint> {
+/// `segments_for(len, flatness)` decides how many pieces each input segment becomes; `flatness`
+/// is the second-difference bound `L` of the segment's Bézier form, so splitting into `n`
+/// pieces deviates from the true curve by at most `0.75 · L / n²` (see [`segments_for_tolerance`]).
+pub fn catmull_rom(points: &[StrokePoint], segments_for: impl Fn(f32, f32) -> usize) -> Vec<StrokePoint> {
     if points.len() < 3 {
         return points.to_vec();
     }
@@ -82,7 +84,13 @@ pub fn catmull_rom(points: &[StrokePoint], segments_for: impl Fn(f32) -> usize) 
     for i in 0..n - 1 {
         let (p0, p1, p2, p3) = (get(i as isize - 1), get(i as isize), get(i as isize + 1), get(i as isize + 2));
         let len = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt();
-        let segs = segments_for(len).max(1);
+        // Bézier control points of this Catmull-Rom segment.
+        let b1 = (p1.x + (p2.x - p0.x) / 6.0, p1.y + (p2.y - p0.y) / 6.0);
+        let b2 = (p2.x - (p3.x - p1.x) / 6.0, p2.y - (p3.y - p1.y) / 6.0);
+        let d1 = (p1.x - 2.0 * b1.0 + b2.0, p1.y - 2.0 * b1.1 + b2.1);
+        let d2 = (b1.0 - 2.0 * b2.0 + p2.x, b1.1 - 2.0 * b2.1 + p2.y);
+        let flatness = (d1.0.hypot(d1.1)).max(d2.0.hypot(d2.1));
+        let segs = segments_for(len, flatness).max(1);
         for s in 0..segs {
             let t = s as f32 / segs as f32;
             let (t2, t3) = (t * t, t * t * t);
@@ -98,6 +106,11 @@ pub fn catmull_rom(points: &[StrokePoint], segments_for: impl Fn(f32) -> usize) 
     }
     out.push(points[n - 1]);
     out
+}
+
+/// Pieces needed so that a Catmull-Rom segment with the given `flatness` stays within `tol`.
+pub fn segments_for_tolerance(flatness: f32, tol: f32) -> usize {
+    (0.75 * flatness / tol).sqrt().ceil().clamp(1.0, 64.0) as usize
 }
 
 #[cfg(test)]
@@ -122,11 +135,40 @@ mod tests {
     fn catmull_rom_passes_through_points() {
         let pts: Vec<StrokePoint> =
             (0..5).map(|i| StrokePoint { x: i as f32 * 10.0, y: (i % 2) as f32 * 10.0, pressure: 0.5 }).collect();
-        let out = catmull_rom(&pts, |_| 4);
+        let out = catmull_rom(&pts, |_, _| 4);
         assert_eq!(out.len(), 4 * 4 + 1);
         for (i, p) in pts.iter().enumerate() {
             let q = out[i * 4];
             assert!((q.x - p.x).abs() < 1e-4 && (q.y - p.y).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn adaptive_subdivision_meets_tolerance() {
+        // Coarse points on a circle of radius 100 (sharp-ish curvature) plus a straight run.
+        let mut pts: Vec<StrokePoint> =
+            (0..12).map(|i| {
+                let a = i as f32 * 0.5;
+                StrokePoint { x: 100.0 * a.cos(), y: 100.0 * a.sin(), pressure: 1.0 }
+            }).collect();
+        pts.extend((1..5).map(|i| StrokePoint { x: 100.0 * 5.5f32.cos() + i as f32 * 80.0, y: 100.0 * 5.5f32.sin(), pressure: 1.0 }));
+        let tol = 0.2;
+        let coarse = catmull_rom(&pts, |_, f| segments_for_tolerance(f, tol));
+        let fine = catmull_rom(&pts, |_, _| 64);
+        assert!(coarse.len() < fine.len() / 3, "{} vs {}", coarse.len(), fine.len());
+        // Every point of the (nearly exact) fine curve is within tolerance of the coarse polyline.
+        for p in &fine {
+            let d = coarse
+                .windows(2)
+                .map(|w| {
+                    let (a, b) = (w[0], w[1]);
+                    let (dx, dy) = (b.x - a.x, b.y - a.y);
+                    let l2 = dx * dx + dy * dy;
+                    let t = if l2 > 0.0 { (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    ((p.x - a.x - dx * t).powi(2) + (p.y - a.y - dy * t).powi(2)).sqrt()
+                })
+                .fold(f32::MAX, f32::min);
+            assert!(d <= tol * 1.05, "deviation {d}");
         }
     }
 }

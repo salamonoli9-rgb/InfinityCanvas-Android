@@ -67,6 +67,52 @@ pub struct CanvasApp {
     pub wants_redraw: bool,
     /// Height (points) covered by the status bar / notch at the top.
     pub safe_top: f32,
+    stats: FrameStats,
+}
+
+/// Frame-time statistics, logged every two seconds while frames are being drawn.
+#[derive(Default)]
+struct FrameStats {
+    start: Option<Instant>,
+    frames: u32,
+    sum: f64,
+    max: f64,
+    visible: usize,
+    phases: [f64; 5],
+    triangles: usize,
+}
+
+impl FrameStats {
+    fn record(&mut self, cpu: f64, visible: usize, query: f64, t: crate::render::Timings) {
+        self.phases[0] += query;
+        self.phases[1] += t.acquire;
+        self.phases[2] += t.build;
+        self.phases[3] += t.submit;
+        self.phases[4] += t.present;
+        self.triangles = self.triangles.max(t.triangles);
+        let start = *self.start.get_or_insert_with(Instant::now);
+        self.frames += 1;
+        self.sum += cpu;
+        self.max = self.max.max(cpu);
+        self.visible = self.visible.max(visible);
+        let span = start.elapsed().as_secs_f64();
+        if span >= 2.0 {
+            log::info!(
+                "frames: {:.0}/s, cpu avg {:.1} ms, max {:.1} ms, visible strokes ≤ {}",
+                self.frames as f64 / span,
+                self.sum / self.frames as f64 * 1e3,
+                self.max * 1e3,
+                self.visible
+            );
+            let n = self.frames as f64 / 1e3;
+            let p = self.phases.map(|x| x / n);
+            log::info!(
+                "  avg ms: query {:.2}, acquire {:.2}, build {:.2}, submit {:.2}, present {:.2}; triangles ≤ {}",
+                p[0], p[1], p[2], p[3], p[4], self.triangles
+            );
+            *self = Self::default();
+        }
+    }
 }
 
 impl CanvasApp {
@@ -107,6 +153,7 @@ impl CanvasApp {
             last_frame: Instant::now(),
             wants_redraw: true,
             safe_top: 0.0,
+            stats: FrameStats::default(),
         }
         .with_touch_style()
     }
@@ -416,7 +463,9 @@ impl CanvasApp {
 
         // Scene.
         let full = [0.0, 0.0, self.viewport[0], self.viewport[1]];
+        let tq = Instant::now();
         let visible = self.doc.query(&self.camera, self.viewport, full);
+        let query_time = tq.elapsed().as_secs_f64();
         let active = self.active.as_ref().map(|a| {
             let f = self.camera.level_frame(a.stroke.level, self.viewport);
             (&a.stroke, f.anchor_to_screen(&a.stroke.anchor, a.stroke.cache.anchor_fast), f.scale)
@@ -434,6 +483,7 @@ impl CanvasApp {
                 textures: output.textures_delta,
             },
         );
+        self.stats.record(now.elapsed().as_secs_f64(), visible.len(), query_time, renderer.timings);
         let egui_repaint = output.viewport_output.values().any(|v| v.repaint_delay.is_zero());
         self.wants_redraw |= renderer.needs_another_frame || egui_repaint || self.inertia.active();
         output.platform_output

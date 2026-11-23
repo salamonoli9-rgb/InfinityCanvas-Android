@@ -98,7 +98,11 @@ impl Gpu {
         let caps = surface.get_capabilities(&adapter);
         // Prefer a non-sRGB format: colours are blended in gamma space like in paint apps.
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        // Mailbox on desktop for the lowest pen latency; vsync (Fifo) on phones, where
+        // rendering faster than the display only drains the battery.
+        // Mailbox on desktop for the lowest pen latency; vsync (Fifo) on phones, where
+        // rendering faster than the display only drains the battery.
+        let present_mode = if !cfg!(target_os = "android") && caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
@@ -128,6 +132,16 @@ impl Gpu {
     }
 }
 
+/// CPU time spent in each phase of the last frame (seconds).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Timings {
+    pub acquire: f64,
+    pub build: f64,
+    pub submit: f64,
+    pub present: f64,
+    pub triangles: usize,
+}
+
 /// Where a frame goes.
 pub enum Target<'a> {
     Surface(&'a Gpu),
@@ -155,6 +169,7 @@ pub struct FrameInput<'a> {
 
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    pipeline_opaque: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     msaa_view: Option<(wgpu::TextureView, [u32; 2])>,
@@ -172,6 +187,8 @@ pub struct Renderer {
     srgb: bool,
     /// Set when some meshes were postponed because of the tessellation budget.
     pub needs_another_frame: bool,
+    /// CPU time of the last frame's phases (seconds), for profiling.
+    pub timings: Timings,
 }
 
 impl Renderer {
@@ -209,8 +226,10 @@ impl Renderer {
             bind_group_layouts: &[Some(&bgl)],
             ..Default::default()
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("stroke"),
+        // Two variants: opaque strokes are drawn without blending, which lets tile-based GPUs
+        // (Mali Forward Pixel Kill, PowerVR HSR) skip fragments hidden by later strokes.
+        let make_pipeline = |label, blend| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -235,7 +254,7 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -245,6 +264,8 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let pipeline = make_pipeline("stroke", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
+        let pipeline_opaque = make_pipeline("stroke opaque", None);
         let egui = egui_wgpu::Renderer::new(
             device,
             format,
@@ -257,6 +278,7 @@ impl Renderer {
         let iu = wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST;
         Self {
             pipeline,
+            pipeline_opaque,
             uniform_buf,
             bind_group,
             msaa_view: None,
@@ -273,6 +295,7 @@ impl Renderer {
             egui,
             srgb: format.is_srgb(),
             needs_another_frame: false,
+            timings: Timings::default(),
         }
     }
 
@@ -383,7 +406,10 @@ impl Renderer {
 
     /// Renders one frame to the window surface and presents it.
     pub fn render(&mut self, gpu: &Gpu, mut input: FrameInput) {
-        let frame = match gpu.surface.get_current_texture() {
+        let t0 = Instant::now();
+        let acquired = gpu.surface.get_current_texture();
+        self.timings.acquire = t0.elapsed().as_secs_f64();
+        let frame = match acquired {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             other => {
                 if matches!(other, wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost) {
@@ -397,7 +423,9 @@ impl Renderer {
         let view = frame.texture.create_view(&Default::default());
         let size = [gpu.config.width, gpu.config.height];
         self.render_to(&gpu.device, &gpu.queue, gpu.config.format, size, &view, input);
+        let t1 = Instant::now();
         gpu.queue.present(frame);
+        self.timings.present = t1.elapsed().as_secs_f64();
     }
 
     /// Renders one frame into `view` (any render-attachment texture of `format`).
@@ -558,6 +586,14 @@ impl Renderer {
             self.msaa_view = Some((tex.create_view(&Default::default()), size));
         }
 
+        self.timings.build = started.elapsed().as_secs_f64();
+        self.timings.triangles = draws
+            .iter()
+            .map(|d| match *d {
+                Draw::Cached { count, .. } | Draw::Dynamic { count, .. } => count as usize / 3,
+            })
+            .sum();
+        let t_submit = Instant::now();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
         let mut egui_cmds = Vec::new();
@@ -575,9 +611,9 @@ impl Renderer {
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("main"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.msaa_view.as_ref().unwrap().0,
+                        view: if MSAA > 1 { &self.msaa_view.as_ref().unwrap().0 } else { view },
                         depth_slice: None,
-                        resolve_target: Some(view),
+                        resolve_target: if MSAA > 1 { Some(view) } else { None },
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
                                 r: bg[0] as f64,
@@ -585,17 +621,23 @@ impl Renderer {
                                 b: bg[2] as f64,
                                 a: bg[3] as f64,
                             }),
-                            store: wgpu::StoreOp::Discard,
+                            store: if MSAA > 1 { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
                         },
                     })],
                     ..Default::default()
                 })
                 .forget_lifetime();
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(1, self.instance_buf.slice(..));
             let mut bound: Option<usize> = None; // usize::MAX = dynamic buffers
+            let mut opaque_bound: Option<bool> = None;
             for d in &draws {
+                let (Draw::Cached { instance, .. } | Draw::Dynamic { instance, .. }) = *d;
+                let opaque = instances[instance as usize].color[3] >= 1.0;
+                if opaque_bound != Some(opaque) {
+                    pass.set_pipeline(if opaque { &self.pipeline_opaque } else { &self.pipeline });
+                    opaque_bound = Some(opaque);
+                }
                 match *d {
                     Draw::Cached { chunk, base_vertex, first_index, count, instance } => {
                         if bound != Some(chunk) {
@@ -620,6 +662,7 @@ impl Renderer {
             }
         }
         queue.submit(egui_cmds.into_iter().chain(std::iter::once(encoder.finish())));
+        self.timings.submit = t_submit.elapsed().as_secs_f64();
         if self.frame.is_multiple_of(120) {
             self.evict();
         }
