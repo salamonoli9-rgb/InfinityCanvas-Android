@@ -106,7 +106,7 @@ pub struct VisibleStroke {
     pub level: i32,
     /// Screen position (px) of the stroke anchor, i.e. of local point (0, 0).
     pub offset: [f64; 2],
-    /// Screen pixels per local unit.
+    /// Screen pixels per local unit (the view rotation is the camera's).
     pub scale: f64,
 }
 
@@ -193,10 +193,19 @@ impl Document {
         for (&level, idx) in self.levels.range(z - LEVELS_ABOVE..=z + LEVELS_BELOW) {
             let f = cam.level_frame(level, viewport);
             let mut candidates: Vec<StrokeId> = idx.oversized.clone();
-            // Query rectangle in level units relative to the reference point.
-            let to_local = |sx: f64, axis: usize| (sx - f.half_viewport[axis]) / f.scale + f.frac[axis];
-            let lo = [to_local(rect[0], 0).floor() - 1.0, to_local(rect[1], 1).floor() - 1.0];
-            let hi = [to_local(rect[2], 0).ceil() + 1.0, to_local(rect[3], 1).ceil() + 1.0];
+            // Query rectangle in level units relative to the reference point: bounding box of
+            // the (possibly rotated) screen rectangle.
+            let mut lo = [f64::MAX; 2];
+            let mut hi = [f64::MIN; 2];
+            for (sx, sy) in [(rect[0], rect[1]), (rect[2], rect[1]), (rect[0], rect[3]), (rect[2], rect[3])] {
+                let v = f.screen_vec_to_local([sx - f.half_viewport[0], sy - f.half_viewport[1]]);
+                for a in 0..2 {
+                    lo[a] = lo[a].min(v[a] + f.frac[a]);
+                    hi[a] = hi[a].max(v[a] + f.frac[a]);
+                }
+            }
+            let lo = [lo[0].floor() - 1.0, lo[1].floor() - 1.0];
+            let hi = [hi[0].ceil() + 1.0, hi[1].ceil() + 1.0];
             let ext = (hi[0] - lo[0]).max(hi[1] - lo[1]);
             let gi = SHIFTS
                 .iter()
@@ -249,8 +258,15 @@ impl Document {
     fn visible(&self, s: &Stroke, f: &LevelFrame, rect: [f64; 4]) -> Option<VisibleStroke> {
         let o = f.anchor_to_screen(&s.anchor, s.cache.anchor_fast);
         let b = s.cache.bbox;
-        let (x0, y0) = (o[0] + b[0] as f64 * f.scale, o[1] + b[1] as f64 * f.scale);
-        let (x1, y1) = (o[0] + b[2] as f64 * f.scale, o[1] + b[3] as f64 * f.scale);
+        // Screen bounding box of the (rotated) local bounding box.
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for (bx, by) in [(b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3])] {
+            let v = f.local_vec_to_screen([bx as f64, by as f64]);
+            x0 = x0.min(o[0] + v[0]);
+            y0 = y0.min(o[1] + v[1]);
+            x1 = x1.max(o[0] + v[0]);
+            y1 = y1.max(o[1] + v[1]);
+        }
         if x1 < rect[0] || x0 > rect[2] || y1 < rect[1] || y0 > rect[3] {
             return None;
         }
@@ -263,11 +279,12 @@ impl Document {
     /// Ids of strokes touched by a circle of `radius` px around screen point `p`.
     pub fn hit_test(&self, cam: &Camera, viewport: [f64; 2], p: [f64; 2], radius: f64) -> Vec<StrokeId> {
         let rect = [p[0] - radius, p[1] - radius, p[0] + radius, p[1] + radius];
+        let rot = cam.rot();
         self.query(cam, viewport, rect)
             .into_iter()
             .filter(|v| {
                 let s = &self.strokes[&v.id];
-                let local = [(p[0] - v.offset[0]) / v.scale, (p[1] - v.offset[1]) / v.scale];
+                let local = crate::camera::unrotate([(p[0] - v.offset[0]) / v.scale, (p[1] - v.offset[1]) / v.scale], rot);
                 s.hit_circle(local, radius / v.scale)
             })
             .map(|v| v.id)
@@ -388,5 +405,28 @@ mod tests {
         assert!(n >= 1000, "{n}");
         // Generous bound for debug builds on slow CI; release is far faster.
         assert!(dt.as_millis() < 200, "{dt:?}");
+    }
+
+    #[test]
+    fn rotated_view_query_and_hit() {
+        let mut doc = Document::new();
+        let mut cam = Camera::default();
+        cam.zoom_at([0.0, 0.0], VP, 120.0);
+        let id = draw(&mut doc, &cam, [1500.0, 900.0]);
+        // Rotate 90° around the screen centre: the stroke moves to a different screen spot,
+        // must still be found there and nowhere else.
+        cam.rotate_at([800.0, 500.0], VP, std::f64::consts::FRAC_PI_2);
+        let s = doc.get(id).unwrap();
+        let f = cam.level_frame(s.level, VP);
+        let o = f.anchor_to_screen(&s.anchor, s.cache.anchor_fast);
+        let mid = s.points[1];
+        let v = f.local_vec_to_screen([mid.x as f64, mid.y as f64]);
+        let p = [o[0] + v[0], o[1] + v[1]];
+        // (1500, 900) relative to the centre (700, 400) rotated by 90° → (-400, 700).
+        assert!((p[0] - 400.0).abs() < 1e-3 && (p[1] - 1200.0).abs() < 1e-3, "{p:?}");
+        assert_eq!(doc.hit_test(&cam, VP, p, 3.0), vec![id]);
+        assert!(doc.hit_test(&cam, VP, [1500.0, 900.0], 3.0).is_empty());
+        assert_eq!(doc.query(&cam, VP, [p[0] - 5.0, p[1] - 5.0, p[0] + 5.0, p[1] + 5.0]).len(), 1);
+        assert!(doc.query(&cam, VP, [1400.0, 850.0, 1600.0, 950.0]).is_empty());
     }
 }

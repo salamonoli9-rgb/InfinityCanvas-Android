@@ -11,6 +11,8 @@ nigdy się nie rozpikselują. Ten sam kod działa na Androidzie i na desktopie L
   dokładne, więc nie ma limitu zoomu w żadną stronę.
 - **Poziom skali kreski.** Kreska pamięta `floor(log2 zoomu)` z chwili rysowania, dokładną
   kotwicę (całkowitą w jednostkach swojego poziomu) i punkty jako małe `f32` względem kotwicy.
+- **Obrót widoku** jest stosowany dopiero po dokładnym odjęciu `kotwica − kamera`, więc nie
+  zmniejsza precyzji na żadnej głębokości.
 - **Transformacja względem kamery.** W każdej klatce liczone jest dokładnie `kotwica − kamera`
   i dopiero wynik trafia do `f32` jako przesunięcie + skala instancji na GPU. Kreski oglądane
   w ogromnym powiększeniu (> 2^6 względem chwili rysowania) są przeliczane w `f64` na CPU
@@ -51,6 +53,7 @@ cargo run --release -- inny.icnv    # otwiera jeden konkretny plik
 | rysowanie | lewy przycisk myszy |
 | przesuwanie | prawy lub środkowy przycisk + przeciągnięcie; przewijanie touchpadem |
 | zoom wokół kursora | kółko myszy (Ctrl + kółko = drobniej); Ctrl + przewijanie lub szczypanie na touchpadzie |
+| obrót wokół kursora | Alt + kółko myszy (7,5° na ząbek); przycisk z kątem na pasku prostuje płótno |
 | cofnij / ponów | Ctrl+Z / Ctrl+Shift+Z lub Ctrl+Y |
 | pióro / gumka | P / E |
 | powrót do początku | Home |
@@ -77,6 +80,7 @@ Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
 |---|---|
 | rysowanie | rysik albo jeden palec |
 | przesuwanie + zoom | dwa palce (szczypanie wokół środka gestu), z bezwładnością po puszczeniu |
+| obrót | przekręcenie dwoma palcami (zaczyna się po ~10°, żeby zwykłe szczypanie nie obracało); blisko pionu (< 6°) płótno samo się prostuje; przycisk z kątem na pasku – wyprostuj |
 | gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika – ściera tylko to, przez co przejdzie (kreska jest przecinana) |
 | palm rejection | po pierwszym użyciu rysika palce już nie rysują – jeden palec przesuwa płótno |
 
@@ -97,7 +101,7 @@ jest renderowana z wektorów przy wyjściu z projektu i co ~20 s podczas rysowan
 ## Zapis
 
 Rysunek zapisuje się automatycznie ~1,5 s po każdej zmianie oraz przy wyjściu/wstrzymaniu
-aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 3; starsze wersje nadal się
+aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 4; starsze wersje nadal się
 wczytują), dane w `postcard`. Zapis jest
 atomowy (plik tymczasowy + rename). Uszkodzony plik nie jest nadpisywany – zostaje przemianowany
 na `*.broken`.

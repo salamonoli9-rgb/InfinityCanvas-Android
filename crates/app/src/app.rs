@@ -21,6 +21,8 @@ const PAN_DECAY: f64 = 4.0;
 const ZOOM_DECAY: f64 = 6.0;
 /// Minimum distance between stored samples, in local units (≈ px at drawing time).
 const MIN_SAMPLE_DIST: f32 = 0.4;
+/// Rotation closer to upright than this (radians, ~6°) snaps to 0 when the fingers lift.
+const SNAP_ANGLE: f64 = 0.1;
 /// Preview width in px (multiple of 64 for the GPU readback).
 const THUMB_W: u32 = 256;
 /// Minimum time between automatic preview refreshes while drawing.
@@ -285,6 +287,7 @@ impl CanvasApp {
                 doc: &self.doc,
                 active: None,
                 log_zoom: cam.log_zoom,
+                rotation: cam.rot(),
                 background: BACKGROUND,
                 egui: None,
                 textures: Default::default(),
@@ -438,6 +441,25 @@ impl CanvasApp {
         self.wants_redraw = true;
     }
 
+    /// Rotates the view by `angle` radians around `pos` (desktop: Alt + wheel).
+    pub fn wheel_rotate(&mut self, pos: [f64; 2], angle: f64) {
+        self.inertia = Inertia::default();
+        self.camera.rotate_at(pos, self.viewport, angle);
+        if self.camera.rotation.abs() < 1e-9 {
+            self.camera.rotation = 0.0;
+        }
+        self.changed();
+    }
+
+    /// Back to upright, rotating around the screen centre.
+    pub fn reset_rotation(&mut self) {
+        let c = [self.viewport[0] * 0.5, self.viewport[1] * 0.5];
+        let r = self.camera.rotation;
+        self.camera.rotate_at(c, self.viewport, -r);
+        self.camera.rotation = 0.0;
+        self.changed();
+    }
+
     pub fn pan(&mut self, delta: [f64; 2]) {
         self.camera.pan_px(delta);
         self.wants_redraw = true;
@@ -487,6 +509,16 @@ impl CanvasApp {
             }
             Gesture::Pan { delta } => self.camera.pan_px(delta),
             Gesture::Zoom { center, dlog } => self.camera.zoom_at(center, self.viewport, dlog),
+            Gesture::Rotate { center, angle } => self.camera.rotate_at(center, self.viewport, angle),
+            Gesture::PinchEnd { center } => {
+                // Snap to upright when released close to it.
+                if self.camera.rotation != 0.0 && self.camera.rotation.abs() < SNAP_ANGLE {
+                    let r = self.camera.rotation;
+                    self.camera.rotate_at(center, self.viewport, -r);
+                    self.camera.rotation = 0.0;
+                }
+                self.changed();
+            }
             Gesture::Fling { velocity, zoom_velocity, center } => {
                 self.inertia = Inertia { velocity, zoom_velocity: zoom_velocity.clamp(-20.0, 20.0), center };
             }
@@ -680,6 +712,7 @@ impl CanvasApp {
             can_undo: self.history.can_undo(),
             can_redo: self.history.can_redo(),
             log_zoom: self.camera.log_zoom,
+            rotation: self.camera.rotation,
             strokes: self.doc.len(),
         };
         let mut actions = ui::Actions::default();
@@ -722,6 +755,9 @@ impl CanvasApp {
         if actions.home {
             self.go_home();
         }
+        if actions.upright {
+            self.reset_rotation();
+        }
         if actions.menu && self.projects.is_some() {
             self.want_gallery = true;
             self.wants_redraw = true;
@@ -755,6 +791,7 @@ impl CanvasApp {
                 doc: &self.doc,
                 active,
                 log_zoom: self.camera.log_zoom,
+                rotation: self.camera.rot(),
                 background: BACKGROUND,
                 egui: Some((&prims, output.pixels_per_point)),
                 textures: output.textures_delta,

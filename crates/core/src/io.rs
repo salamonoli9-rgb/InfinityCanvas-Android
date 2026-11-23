@@ -7,12 +7,33 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 4] = b"ICNV";
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
+
+/// Version 4: the camera has a rotation.
+#[derive(Serialize, Deserialize)]
+struct FileV4 {
+    camera: Camera,
+    next_id: StrokeId,
+    strokes: Vec<Stroke>,
+}
+
+/// Camera of versions 1–3 (no rotation).
+#[derive(Deserialize)]
+struct CameraV1 {
+    center: crate::coords::WorldPos,
+    log_zoom: f64,
+}
+
+impl From<CameraV1> for Camera {
+    fn from(c: CameraV1) -> Self {
+        Camera { center: c.center, log_zoom: c.log_zoom, rotation: 0.0 }
+    }
+}
 
 /// Version 3: strokes carry flat caps where the eraser cut them (`Stroke::flat_caps`).
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct FileV3 {
-    camera: Camera,
+    camera: CameraV1,
     next_id: StrokeId,
     strokes: Vec<Stroke>,
 }
@@ -20,7 +41,7 @@ struct FileV3 {
 /// Version 2: strokes carry a draw order (`Stroke::order`), no caps.
 #[derive(Deserialize)]
 struct FileV2 {
-    camera: Camera,
+    camera: CameraV1,
     next_id: StrokeId,
     strokes: Vec<StrokeV2>,
 }
@@ -48,7 +69,7 @@ impl From<StrokeV2> for Stroke {
 /// Version 1: no draw order; the id was the order.
 #[derive(Deserialize)]
 struct FileV1 {
-    camera: Camera,
+    camera: CameraV1,
     next_id: StrokeId,
     strokes: Vec<StrokeV1>,
 }
@@ -93,7 +114,7 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 pub fn encode(doc: &Document, camera: &Camera) -> Vec<u8> {
-    let file = FileV3 { camera: camera.clone(), next_id: doc.next_id(), strokes: doc.strokes().cloned().collect() };
+    let file = FileV4 { camera: camera.clone(), next_id: doc.next_id(), strokes: doc.strokes().cloned().collect() };
     let mut out = Vec::with_capacity(64 + doc.len() * 128);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
@@ -109,14 +130,18 @@ pub fn decode(bytes: &[u8]) -> Result<(Document, Camera), LoadError> {
     match version {
         1 => {
             let f: FileV1 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
-            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera))
+            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera.into()))
         }
         2 => {
             let f: FileV2 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
-            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera))
+            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera.into()))
         }
         3 => {
             let f: FileV3 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
+            Ok((Document::from_strokes(f.strokes, f.next_id), f.camera.into()))
+        }
+        4 => {
+            let f: FileV4 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
             Ok((Document::from_strokes(f.strokes, f.next_id), f.camera))
         }
         v => Err(LoadError::UnsupportedVersion(v)),
@@ -153,6 +178,7 @@ mod tests {
         let mut doc = Document::new();
         let mut cam = Camera::default();
         cam.zoom_at([1.0, 2.0], [100.0, 100.0], 333.25);
+        cam.rotate_at([1.0, 2.0], [100.0, 100.0], 0.7);
         let anchor = [BigInt::from(-7) << 400u32, BigInt::from(12345) << 333u32];
         let mut s = Stroke::new(doc.alloc_id(), 333, anchor, [1, 2, 3, 255], 3.5);
         s.push(StrokePoint { x: 1.0, y: -2.0, pressure: 0.5 });
@@ -175,7 +201,7 @@ mod tests {
     fn rejects_garbage() {
         assert!(matches!(decode(b"nope"), Err(LoadError::BadMagic)));
         assert!(matches!(decode(b"ICNV\x09\x00"), Err(LoadError::UnsupportedVersion(9))));
-        assert!(matches!(decode(b"ICNV\x03\x00\xff"), Err(LoadError::Corrupt(_))));
+        assert!(matches!(decode(b"ICNV\x04\x00\xff"), Err(LoadError::Corrupt(_))));
     }
 
     #[test]
@@ -190,14 +216,19 @@ mod tests {
             width: f32,
         }
         #[derive(Serialize)]
+        struct C1 {
+            center: crate::coords::WorldPos,
+            log_zoom: f64,
+        }
+        #[derive(Serialize)]
         struct F1 {
-            camera: Camera,
+            camera: C1,
             next_id: StrokeId,
             strokes: Vec<S1>,
         }
         let pts = vec![StrokePoint { x: 1.0, y: 2.0, pressure: 1.0 }, StrokePoint { x: 3.0, y: 2.0, pressure: 1.0 }];
         let f = F1 {
-            camera: Camera::default(),
+            camera: C1 { center: crate::coords::WorldPos::origin(), log_zoom: 2.5 },
             next_id: 8,
             strokes: vec![S1 { id: 7, level: -3, anchor: [BigInt::from(5), BigInt::from(-5)], points: pts.clone(), color: [9, 9, 9, 255], width: 2.0 }],
         };
@@ -206,6 +237,7 @@ mod tests {
         let (d, _) = decode(&bytes).unwrap();
         let s = d.get(7).unwrap();
         assert_eq!((s.order, s.level, &s.points, s.width), (7, -3, &pts, 2.0));
+        assert_eq!(decode(&bytes).unwrap().1.log_zoom, 2.5);
         assert_eq!(d.next_id(), 8);
     }
 
@@ -222,14 +254,19 @@ mod tests {
             order: u64,
         }
         #[derive(Serialize)]
+        struct C1 {
+            center: crate::coords::WorldPos,
+            log_zoom: f64,
+        }
+        #[derive(Serialize)]
         struct F2 {
-            camera: Camera,
+            camera: C1,
             next_id: StrokeId,
             strokes: Vec<S2>,
         }
         let pts = vec![StrokePoint { x: 1.0, y: 2.0, pressure: 1.0 }, StrokePoint { x: 3.0, y: 2.0, pressure: 1.0 }];
         let f = F2 {
-            camera: Camera::default(),
+            camera: C1 { center: crate::coords::WorldPos::origin(), log_zoom: 0.0 },
             next_id: 10,
             strokes: vec![S2 { id: 9, level: 4, anchor: [BigInt::from(1), BigInt::from(2)], points: pts.clone(), color: [1, 2, 3, 255], width: 5.0, order: 3 }],
         };
@@ -238,5 +275,30 @@ mod tests {
         let (d, _) = decode(&bytes).unwrap();
         let s = d.get(9).unwrap();
         assert_eq!((s.order, s.flat_caps, &s.points), (3, [false, false], &pts));
+    }
+
+    #[test]
+    fn reads_version_3() {
+        #[derive(Serialize)]
+        struct C1 {
+            center: crate::coords::WorldPos,
+            log_zoom: f64,
+        }
+        #[derive(Serialize)]
+        struct F3 {
+            camera: C1,
+            next_id: StrokeId,
+            strokes: Vec<Stroke>,
+        }
+        let mut st = Stroke::new(4, 1, [BigInt::from(3), BigInt::from(-3)], [5, 5, 5, 255], 1.5);
+        st.push(StrokePoint { x: 0.0, y: 0.0, pressure: 1.0 });
+        st.push(StrokePoint { x: 2.0, y: 1.0, pressure: 0.5 });
+        st.flat_caps = [true, false];
+        let f = F3 { camera: C1 { center: crate::coords::WorldPos::origin(), log_zoom: -7.0 }, next_id: 5, strokes: vec![st.clone()] };
+        let mut bytes = b"ICNV\x03\x00".to_vec();
+        bytes.extend(postcard::to_allocvec(&f).unwrap());
+        let (d, cam) = decode(&bytes).unwrap();
+        assert_eq!(d.get(4), Some(&st));
+        assert_eq!((cam.log_zoom, cam.rotation), (-7.0, 0.0));
     }
 }

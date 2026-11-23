@@ -13,10 +13,11 @@ struct VOut {
 fn vs(
     @location(0) p: vec2<f32>,
     @location(1) offset: vec2<f32>,
-    @location(2) scale: f32,
+    @location(2) rs: vec2<f32>,
     @location(3) color: vec4<f32>,
 ) -> VOut {
-    let s = offset + p * scale;
+    // offset + R·p·scale, with rs = scale·(cos, sin).
+    let s = offset + vec2<f32>(rs.x * p.x - rs.y * p.y, rs.y * p.x + rs.x * p.y);
     var o: VOut;
     o.pos = vec4<f32>(s.x / u.viewport.x * 2.0 - 1.0, 1.0 - s.y / u.viewport.y * 2.0, 0.0, 1.0);
     o.color = color;

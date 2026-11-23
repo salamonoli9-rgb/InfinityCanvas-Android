@@ -28,6 +28,7 @@ struct Desktop {
     cursor: [f64; 2],
     buttons: Vec<MouseButton>,
     ctrl: bool,
+    alt: bool,
 }
 
 fn data_dir() -> std::path::PathBuf {
@@ -74,7 +75,10 @@ impl Desktop {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.app.pixels_per_point = scale_factor as f32;
             }
-            WindowEvent::ModifiersChanged(m) => self.ctrl = m.state().control_key(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.ctrl = m.state().control_key();
+                self.alt = m.state().alt_key();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = [position.x, position.y];
                 if let Some(&b) = self.buttons.first() {
@@ -109,6 +113,10 @@ impl Desktop {
                     return;
                 }
                 match delta {
+                    // Alt + wheel rotates (7.5° per notch).
+                    MouseScrollDelta::LineDelta(_, y) if self.alt => {
+                        self.app.wheel_rotate(self.cursor, y as f64 * 7.5f64.to_radians());
+                    }
                     MouseScrollDelta::LineDelta(_, y) => {
                         let step = if self.ctrl { 0.05 } else { 0.25 };
                         self.app.wheel_zoom(self.cursor, y as f64 * step);
@@ -124,6 +132,7 @@ impl Desktop {
                 }
             }
             WindowEvent::PinchGesture { delta, .. } => self.app.wheel_zoom(self.cursor, (1.0 + delta).log2()),
+            WindowEvent::RotationGesture { delta, .. } => self.app.wheel_rotate(self.cursor, -(delta as f64).to_radians()),
             WindowEvent::Touch(t) => {
                 let phase = match t.phase {
                     TouchPhase::Started => Phase::Down,
@@ -235,6 +244,7 @@ pub fn run() {
         cursor: [0.0; 2],
         buttons: Vec::new(),
         ctrl: false,
+        alt: false,
     };
     event_loop.run_app(&mut d).expect("event loop failed");
 }

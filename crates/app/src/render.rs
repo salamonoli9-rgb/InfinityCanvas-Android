@@ -26,14 +26,14 @@ const TESSELLATION_BUDGET: Duration = Duration::from_millis(6);
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Instance {
     offset: [f32; 2],
-    scale: f32,
-    _pad: f32,
+    /// Scale × (cos, sin) of the view rotation: screen = offset + R·local·scale.
+    rs: [f32; 2],
     color: [f32; 4],
 }
 
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 1 },
-    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 8, shader_location: 2 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 3 },
 ];
 
@@ -171,6 +171,8 @@ pub struct FrameInput<'a> {
     /// Stroke being drawn right now (not in the document yet) with its transform.
     pub active: Option<(&'a Stroke, [f64; 2], f64)>,
     pub log_zoom: f64,
+    /// (cos, sin) of the view rotation.
+    pub rotation: [f64; 2],
     pub background: [f32; 4],
     pub egui: Option<(&'a [egui::ClippedPrimitive], f32)>,
     /// egui texture updates; always consumed, even when the frame is skipped.
@@ -517,6 +519,8 @@ impl Renderer {
         self.apply_textures(device, queue, &mut input.textures);
         self.needs_another_frame = false;
         let vp = [size[0] as f64, size[1] as f64];
+        let rot = input.rotation;
+        let rs = |scale: f64| [(scale * rot[0]) as f32, (scale * rot[1]) as f32];
 
         let mut instances: Vec<Instance> = Vec::with_capacity(input.visible.len() + 1);
         let mut draws: Vec<Draw> = Vec::with_capacity(input.visible.len() + 1);
@@ -558,7 +562,7 @@ impl Renderer {
                 };
                 if let Some(m) = cached {
                     let instance = instances.len() as u32;
-                    instances.push(Instance { offset: f32x2(v.offset), scale: v.scale as f32, _pad: 0.0, color });
+                    instances.push(Instance { offset: f32x2(v.offset), rs: rs(v.scale), color });
                     draws.push(Draw::Cached {
                         chunk: m.chunk,
                         base_vertex: m.base_vertex,
@@ -582,10 +586,10 @@ impl Renderer {
                 };
                 let base = dyn_v.len();
                 let first = dyn_i.len();
-                push_cpu_path(&mesh, v.offset, v.scale, vp, &mut dyn_v, &mut dyn_i);
+                push_cpu_path(&mesh, v.offset, v.scale, rot, vp, &mut dyn_v, &mut dyn_i);
                 if dyn_i.len() > first {
                     let instance = instances.len() as u32;
-                    instances.push(Instance { offset: [0.0, 0.0], scale: 1.0, _pad: 0.0, color });
+                    instances.push(Instance { offset: [0.0, 0.0], rs: [1.0, 0.0], color });
                     draws.push(Draw::Dynamic {
                         base_vertex: base as i32,
                         first_index: first as u32,
@@ -606,7 +610,7 @@ impl Renderer {
                 dyn_v.extend_from_slice(&mesh.vertices);
                 dyn_i.extend_from_slice(&mesh.indices);
                 let instance = instances.len() as u32;
-                instances.push(Instance { offset: f32x2(offset), scale: scale as f32, _pad: 0.0, color: self.color(stroke.color) });
+                instances.push(Instance { offset: f32x2(offset), rs: rs(scale), color: self.color(stroke.color) });
                 draws.push(Draw::Dynamic {
                     base_vertex: base as i32,
                     first_index: first as u32,
@@ -750,12 +754,21 @@ fn f32x2(v: [f64; 2]) -> [f32; 2] {
 
 /// Transforms a mesh to screen space in f64 and clips it to a guard band around the viewport.
 /// Output vertices are in screen pixels; indices are relative to the first vertex pushed.
-fn push_cpu_path(mesh: &Mesh, offset: [f64; 2], scale: f64, vp: [f64; 2], out_v: &mut Vec<[f32; 2]>, out_i: &mut Vec<u32>) {
+fn push_cpu_path(
+    mesh: &Mesh,
+    offset: [f64; 2],
+    scale: f64,
+    rot: [f64; 2],
+    vp: [f64; 2],
+    out_v: &mut Vec<[f32; 2]>,
+    out_i: &mut Vec<u32>,
+) {
     let base = out_v.len() as u32;
     let guard = [-vp[0], -vp[1], 2.0 * vp[0], 2.0 * vp[1]];
     let tf = |i: u32| {
         let v = mesh.vertices[i as usize];
-        [offset[0] + v[0] as f64 * scale, offset[1] + v[1] as f64 * scale]
+        let r = canvas_core::camera::rotate([v[0] as f64 * scale, v[1] as f64 * scale], rot);
+        [offset[0] + r[0], offset[1] + r[1]]
     };
     for tri in mesh.indices.as_chunks::<3>().0 {
         let p = [tf(tri[0]), tf(tri[1]), tf(tri[2])];

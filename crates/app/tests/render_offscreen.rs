@@ -290,3 +290,32 @@ fn leaving_a_project_writes_its_preview() {
     assert!(at(w / 2, h / 2 + 40) > 200, "background elsewhere");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn rotated_view_renders_on_gpu_and_cpu_paths() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    // Horizontal line through the screen centre (384, 150), 10 px thick.
+    draw_line(&mut app, 150.0, 300.0, 468.0);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 350, 150) && !dark(&px, 384, 110));
+    // Quarter turn around the centre: the line becomes vertical (GPU instancing path).
+    app.wheel_rotate([384.0, 150.0], std::f64::consts::FRAC_PI_2);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 384, 110) && dark(&px, 384, 190), "vertical after rotation");
+    assert!(!dark(&px, 340, 150) && !dark(&px, 430, 150));
+    // Magnify 2^8 around the line's right edge (x = 389): strokes this magnified take the
+    // exact CPU path, which must apply the same rotation. The edge stays put.
+    app.wheel_zoom([389.0, 150.0], 8.0);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 384, 150) && dark(&px, 386, 40), "inside the line");
+    assert!(!dark(&px, 393, 150) && !dark(&px, 393, 260), "outside the edge");
+    // Straighten again.
+    app.reset_rotation();
+    app.wheel_zoom([389.0, 150.0], -8.0);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 350, 150) && !dark(&px, 384, 110));
+}

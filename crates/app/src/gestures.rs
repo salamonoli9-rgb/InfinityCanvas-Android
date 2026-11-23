@@ -56,6 +56,10 @@ pub enum Gesture {
     StrokeCancel,
     Pan { delta: [f64; 2] },
     Zoom { center: [f64; 2], dlog: f64 },
+    /// Rotate the view by `angle` radians around `center` (screen px).
+    Rotate { center: [f64; 2], angle: f64 },
+    /// Two-finger gesture finished (the view may snap to an upright angle).
+    PinchEnd { center: [f64; 2] },
     /// Gesture released with this velocity: pan px/s and zoom log2/s.
     Fling { velocity: [f64; 2], zoom_velocity: f64, center: [f64; 2] },
     /// Any touch started: stop inertia.
@@ -80,6 +84,9 @@ enum Mode {
 
 /// A stroke started by a finger is discarded when a second finger lands within this time.
 const CANCEL_WINDOW: f64 = 0.25;
+/// Two fingers must twist this much (radians, ~10°) before the view starts rotating, so plain
+/// pinch-zooming never tilts the canvas by accident.
+const ROTATE_THRESHOLD: f64 = 0.17;
 
 pub struct Gestures {
     pointers: HashMap<u64, Tracked>,
@@ -90,6 +97,10 @@ pub struct Gestures {
     zoom_velocity: f64,
     last_center: [f64; 2],
     last_dist: f64,
+    last_angle: f64,
+    /// Twist accumulated before rotation engages (see `ROTATE_THRESHOLD`).
+    twist: f64,
+    rotating: bool,
 }
 
 impl Default for Gestures {
@@ -103,12 +114,19 @@ impl Default for Gestures {
             zoom_velocity: 0.0,
             last_center: [0.0; 2],
             last_dist: 1.0,
+            last_angle: 0.0,
+            twist: 0.0,
+            rotating: false,
         }
     }
 }
 
 fn mid(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
     [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+}
+
+fn angle(a: [f64; 2], b: [f64; 2]) -> f64 {
+    (b[1] - a[1]).atan2(b[0] - a[0])
 }
 
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -131,6 +149,9 @@ impl Gestures {
         let (pa, pb) = (self.pointers[&a].pos, self.pointers[&b].pos);
         self.last_center = mid(pa, pb);
         self.last_dist = dist(pa, pb);
+        self.last_angle = angle(pa, pb);
+        self.twist = 0.0;
+        self.rotating = false;
         self.last_time = time;
         self.velocity = [0.0; 2];
         self.zoom_velocity = 0.0;
@@ -248,6 +269,18 @@ impl Gestures {
                         self.track_velocity(delta, dlog, e.time);
                         out.push(Gesture::Pan { delta });
                         out.push(Gesture::Zoom { center: c, dlog });
+                        let a = angle(pa, pb);
+                        let da = canvas_core::camera::wrap_angle(a - self.last_angle);
+                        self.last_angle = a;
+                        if self.rotating {
+                            out.push(Gesture::Rotate { center: c, angle: da });
+                        } else {
+                            self.twist += da;
+                            if self.twist.abs() > ROTATE_THRESHOLD {
+                                self.rotating = true;
+                                out.push(Gesture::Rotate { center: c, angle: self.twist });
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -271,6 +304,7 @@ impl Gestures {
                         if let Some(f) = self.fling(e.time) {
                             out.push(f);
                         }
+                        out.push(Gesture::PinchEnd { center: self.last_center });
                         self.mode = Mode::Blocked;
                     }
                     _ => {}
@@ -323,5 +357,34 @@ mod tests {
         out.clear();
         g.handle(&ev(1, PointerKind::Touch, Phase::Move, [3.0, 0.0], 0.08), &mut out);
         assert!(out.iter().all(|g| !matches!(g, Gesture::StrokeMove { .. } | Gesture::StrokeBegin { .. })));
+    }
+
+    #[test]
+    fn twist_rotates_only_past_threshold() {
+        let mut g = Gestures::default();
+        let mut out = Vec::new();
+        g.handle(&ev(1, PointerKind::Touch, Phase::Down, [100.0, 500.0], 0.0), &mut out);
+        g.handle(&ev(2, PointerKind::Touch, Phase::Down, [300.0, 500.0], 0.01), &mut out);
+        let rot = |out: &Vec<Gesture>| out.iter().filter_map(|g| if let Gesture::Rotate { angle, .. } = g { Some(*angle) } else { None }).sum::<f64>();
+        // A small wobble (~3°) does not rotate.
+        out.clear();
+        g.handle(&ev(2, PointerKind::Touch, Phase::Move, [300.0, 505.0], 0.02), &mut out);
+        assert_eq!(rot(&out), 0.0);
+        // Twisting to 45° rotates by the full twist, not just the part past the threshold.
+        out.clear();
+        let mut total = 0.0;
+        for k in 1..=10 {
+            let a = (k as f64 / 10.0) * std::f64::consts::FRAC_PI_4;
+            g.handle(&ev(2, PointerKind::Touch, Phase::Move, [200.0 + 100.0 * a.cos(), 500.0 + 100.0 * a.sin()], 0.02 + k as f64 * 0.01), &mut out);
+            total += rot(&out);
+            out.clear();
+        }
+        g.handle(&ev(2, PointerKind::Touch, Phase::Move, [200.0 + 100.0 * std::f64::consts::FRAC_PI_4.cos(), 500.0 + 100.0 * std::f64::consts::FRAC_PI_4.sin()], 0.2), &mut out);
+        // Finger 1 is at (100, 500), so the pair's angle is measured from it, not the centre.
+        let expected = angle([100.0, 500.0], [200.0 + 100.0 * std::f64::consts::FRAC_PI_4.cos(), 500.0 + 100.0 * std::f64::consts::FRAC_PI_4.sin()]);
+        assert!((total - expected).abs() < 1e-9, "{total} vs {expected}");
+        out.clear();
+        g.handle(&ev(1, PointerKind::Touch, Phase::Up, [100.0, 500.0], 0.3), &mut out);
+        assert!(out.iter().any(|g| matches!(g, Gesture::PinchEnd { .. })));
     }
 }

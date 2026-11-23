@@ -46,6 +46,8 @@ pub struct Info {
     pub can_undo: bool,
     pub can_redo: bool,
     pub log_zoom: f64,
+    /// View rotation in radians.
+    pub rotation: f64,
     pub strokes: usize,
 }
 
@@ -55,6 +57,8 @@ pub struct Actions {
     pub redo: bool,
     pub home: bool,
     pub menu: bool,
+    /// Rotate the view back to upright.
+    pub upright: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -122,6 +126,14 @@ fn menu_button(ui: &mut egui::Ui, a: &mut Actions) {
     a.menu |= ui.button("Projekty").on_hover_text("Wróć do listy projektów").clicked();
 }
 
+/// Shown only while the view is rotated; a tap straightens it.
+fn rotation_button(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
+    let deg = info.rotation.to_degrees().round();
+    if deg != 0.0 || info.rotation != 0.0 {
+        a.upright |= ui.button(format!("{deg:.0}°")).on_hover_text("Obrót płótna – stuknij, aby wyprostować").clicked();
+    }
+}
+
 fn zoom_label(ui: &mut egui::Ui, info: &Info) {
     ui.label(egui::RichText::new(zoom_text(info.log_zoom)).monospace())
         .on_hover_text(format!("log2 zoomu: {:.2}\nkresek: {}", info.log_zoom, info.strokes));
@@ -173,9 +185,11 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                 });
                 ui.horizontal_wrapped(|ui| colors(ui, s));
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().slider_width = ui.spacing().slider_width.min(90.0);
                     size_slider(ui, s, false);
                     ui.separator();
                     home_button(ui, &mut a);
+                    rotation_button(ui, info, &mut a);
                     zoom_label(ui, info);
                 });
             } else {
@@ -191,6 +205,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     history_buttons(ui, info, &mut a);
                     home_button(ui, &mut a);
                     ui.separator();
+                    rotation_button(ui, info, &mut a);
                     zoom_label(ui, info);
                 });
             }
@@ -388,7 +403,7 @@ mod layout_tests {
             st.spacing.slider_width = 120.0;
         });
         let mut s = ToolState::default();
-        let info = Info { can_undo: true, can_redo: false, log_zoom: 3.4, strokes: 2 };
+        let info = Info { can_undo: true, can_redo: false, log_zoom: -33.4, rotation: -2.5, strokes: 2 };
         let mut rect = Rect::NOTHING;
         for _ in 0..4 {
             let raw = egui::RawInput {

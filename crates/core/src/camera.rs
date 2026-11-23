@@ -1,7 +1,9 @@
 //! Camera with exact position and logarithmic zoom.
 //!
 //! Screen pixels per world unit = `2^log_zoom`. Screen space has its origin in the top-left
-//! corner and the y axis pointing down, world space uses the same orientation.
+//! corner and the y axis pointing down, world space uses the same orientation. The view can be
+//! rotated by `rotation` radians (clockwise on screen); the rotation is applied only after the
+//! exact `world - camera` difference, so it costs no precision at any depth.
 
 use crate::coords::{Dyadic, WorldPos, ldexp};
 use num_bigint::BigInt;
@@ -15,12 +17,31 @@ const EXTRA_BITS: i32 = 64;
 pub struct Camera {
     pub center: WorldPos,
     pub log_zoom: f64,
+    /// View rotation in radians, kept in (-π, π].
+    pub rotation: f64,
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        Self { center: WorldPos::origin(), log_zoom: 0.0 }
+        Self { center: WorldPos::origin(), log_zoom: 0.0, rotation: 0.0 }
     }
+}
+
+/// Rotates `v` by the angle whose (cos, sin) is `r`.
+pub fn rotate(v: [f64; 2], r: [f64; 2]) -> [f64; 2] {
+    [r[0] * v[0] - r[1] * v[1], r[1] * v[0] + r[0] * v[1]]
+}
+
+/// Rotates `v` by minus the angle whose (cos, sin) is `r`.
+pub fn unrotate(v: [f64; 2], r: [f64; 2]) -> [f64; 2] {
+    [r[0] * v[0] + r[1] * v[1], -r[1] * v[0] + r[0] * v[1]]
+}
+
+/// Angle wrapped into (-π, π].
+pub fn wrap_angle(a: f64) -> f64 {
+    let t = std::f64::consts::TAU;
+    let w = a - t * (a / t).round();
+    if w <= -std::f64::consts::PI { w + t } else { w }
 }
 
 /// Integer part of the zoom exponent; also the "scale level" new strokes are drawn at.
@@ -38,8 +59,14 @@ impl Camera {
         (k, self.log_zoom - k as f64)
     }
 
+    /// (cos, sin) of the view rotation.
+    pub fn rot(&self) -> [f64; 2] {
+        if self.rotation == 0.0 { [1.0, 0.0] } else { [self.rotation.cos(), self.rotation.sin()] }
+    }
+
     /// World-space vector that spans `d` screen pixels.
     pub fn screen_delta_to_world(&self, d: [f64; 2]) -> WorldPos {
+        let d = unrotate(d, self.rot());
         let (k, f) = self.split_zoom();
         let s = (-f).exp2();
         WorldPos::new(
@@ -57,7 +84,8 @@ impl Camera {
         let (k, f) = self.split_zoom();
         let s = f.exp2();
         let d = w.sub(&self.center).mul_pow2(k).to_f64();
-        [d[0] * s + viewport[0] * 0.5, d[1] * s + viewport[1] * 0.5]
+        let d = rotate([d[0] * s, d[1] * s], self.rot());
+        [d[0] + viewport[0] * 0.5, d[1] + viewport[1] * 0.5]
     }
 
     fn trim(&mut self) {
@@ -83,6 +111,18 @@ impl Camera {
         self.trim();
     }
 
+    /// Rotates the view by `angle` radians keeping screen point `p` fixed.
+    pub fn rotate_at(&mut self, p: [f64; 2], viewport: [f64; 2], angle: f64) {
+        if !angle.is_finite() || angle == 0.0 {
+            return;
+        }
+        let anchor = self.screen_to_world(p, viewport);
+        self.rotation = wrap_angle(self.rotation + angle);
+        let d = [p[0] - viewport[0] * 0.5, p[1] - viewport[1] * 0.5];
+        self.center = anchor.sub(&self.screen_delta_to_world(d));
+        self.trim();
+    }
+
     /// Per-frame helper for converting stroke-local coordinates at `level` to the screen.
     pub fn level_frame(&self, level: i32, viewport: [f64; 2]) -> LevelFrame {
         let c = self.center.mul_pow2(level);
@@ -97,6 +137,7 @@ impl Camera {
             reference_fast: fast,
             frac: [fx, fy],
             scale: (self.log_zoom - level as f64).exp2(),
+            rot: self.rot(),
             half_viewport: [viewport[0] * 0.5, viewport[1] * 0.5],
         }
     }
@@ -106,8 +147,9 @@ impl Camera {
 ///
 /// A stroke at `level` stores an integer `anchor` (in units of `2^-level` world units) and
 /// local f32 points relative to it. Its screen position is
-/// `((anchor - reference) - frac + local) * scale + half_viewport`, where only the first
-/// difference involves big integers and it is small for anything near the screen.
+/// `R · ((anchor - reference) - frac + local) * scale + half_viewport` (R = view rotation),
+/// where only the first difference involves big integers and it is small for anything near
+/// the screen.
 #[derive(Clone, Debug)]
 pub struct LevelFrame {
     pub level: i32,
@@ -116,6 +158,8 @@ pub struct LevelFrame {
     pub frac: [f64; 2],
     /// Screen pixels per level unit.
     pub scale: f64,
+    /// (cos, sin) of the view rotation.
+    pub rot: [f64; 2],
     pub half_viewport: [f64; 2],
 }
 
@@ -141,16 +185,26 @@ impl LevelFrame {
     /// Screen position of the anchor (top-left origin, pixels).
     pub fn anchor_to_screen(&self, anchor: &[BigInt; 2], fast: Option<[i128; 2]>) -> [f64; 2] {
         let o = self.anchor_offset(anchor, fast);
-        [o[0] * self.scale + self.half_viewport[0], o[1] * self.scale + self.half_viewport[1]]
+        let o = rotate([o[0] * self.scale, o[1] * self.scale], self.rot);
+        [o[0] + self.half_viewport[0], o[1] + self.half_viewport[1]]
+    }
+
+    /// Screen-space vector of a local-unit vector (rotation and scale, no translation).
+    pub fn local_vec_to_screen(&self, v: [f64; 2]) -> [f64; 2] {
+        rotate([v[0] * self.scale, v[1] * self.scale], self.rot)
+    }
+
+    /// Local-unit vector of a screen-space vector.
+    pub fn screen_vec_to_local(&self, v: [f64; 2]) -> [f64; 2] {
+        let u = unrotate(v, self.rot);
+        [u[0] / self.scale, u[1] / self.scale]
     }
 
     /// Converts a screen point into level-local units relative to `anchor`.
     pub fn screen_to_local(&self, p: [f64; 2], anchor: &[BigInt; 2], fast: Option<[i128; 2]>) -> [f64; 2] {
         let o = self.anchor_offset(anchor, fast);
-        [
-            (p[0] - self.half_viewport[0]) / self.scale - o[0],
-            (p[1] - self.half_viewport[1]) / self.scale - o[1],
-        ]
+        let v = self.screen_vec_to_local([p[0] - self.half_viewport[0], p[1] - self.half_viewport[1]]);
+        [v[0] - o[0], v[1] - o[1]]
     }
 }
 
@@ -235,5 +289,50 @@ mod tests {
             VP,
         );
         assert!(close(s1, s2, 1e-6), "{s1:?} vs {s2:?}");
+    }
+
+    #[test]
+    fn rotation_keeps_pivot_and_roundtrips_deep() {
+        let mut cam = Camera::default();
+        cam.zoom_at([300.0, 200.0], VP, 280.0);
+        let p = [1500.0, 900.0];
+        let w0 = cam.screen_to_world(p, VP);
+        for _ in 0..100 {
+            cam.rotate_at(p, VP, 0.173);
+        }
+        assert!(close(cam.world_to_screen(&w0, VP), p, 1e-6));
+        assert!(cam.rotation.abs() <= std::f64::consts::PI);
+        for q in [[0.0, 0.0], [1919.5, 3.25], [960.123, 540.987]] {
+            let back = cam.world_to_screen(&cam.screen_to_world(q, VP), VP);
+            assert!(close(q, back, 1e-6), "{q:?} -> {back:?}");
+        }
+        // Panning moves content along the screen axes regardless of rotation.
+        let a = cam.world_to_screen(&w0, VP);
+        cam.pan_px([10.0, -4.0]);
+        let b = cam.world_to_screen(&w0, VP);
+        assert!(close([b[0] - a[0], b[1] - a[1]], [10.0, -4.0], 1e-6));
+        // Level frames agree with the camera.
+        let level = cam.level() - 3;
+        let f = cam.level_frame(level, VP);
+        let w = cam.screen_to_world([800.0, 100.0], VP);
+        let anchor = [w.x.mul_pow2(level).floor_at(0), w.y.mul_pow2(level).floor_at(0)];
+        let s1 = f.anchor_to_screen(&anchor, None);
+        let s2 = cam.world_to_screen(&WorldPos::new(Dyadic::new(anchor[0].clone(), -level), Dyadic::new(anchor[1].clone(), -level)), VP);
+        assert!(close(s1, s2, 1e-6), "{s1:?} vs {s2:?}");
+        let l = f.screen_to_local([33.0, 44.0], &anchor, None);
+        let back = {
+            let o = f.anchor_to_screen(&anchor, None);
+            let v = f.local_vec_to_screen(l);
+            [o[0] + v[0], o[1] + v[1]]
+        };
+        assert!(close(back, [33.0, 44.0], 1e-6));
+    }
+
+    #[test]
+    fn wrap() {
+        use std::f64::consts::PI;
+        assert!((wrap_angle(3.0 * PI) - PI).abs() < 1e-12);
+        assert!((wrap_angle(-PI) - PI).abs() < 1e-12);
+        assert!((wrap_angle(0.5 - 4.0 * PI) - 0.5).abs() < 1e-12);
     }
 }
