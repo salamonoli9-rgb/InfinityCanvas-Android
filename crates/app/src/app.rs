@@ -555,6 +555,7 @@ impl CanvasApp {
             return;
         }
         let mut out = Vec::new();
+        self.gestures.pan_only = self.tools.tool == Tool::Hand && self.image_edit.is_none();
         self.gestures.handle(&e, &mut out);
         for g in out {
             self.apply(g, e.kind);

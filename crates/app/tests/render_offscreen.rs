@@ -927,3 +927,28 @@ fn zooming_never_shows_holes() {
     app.wheel_zoom([384.0, 200.0], 4.0);
     check(&mut app, "zoom in");
 }
+
+#[test]
+fn move_tool_pans_with_one_finger() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    draw_line(&mut app, 200.0, 300.0, 500.0);
+    assert_eq!(app.doc.len(), 1);
+    app.tools.tool = infinite_canvas::ui::Tool::Hand;
+    let touch = |app: &mut CanvasApp, phase, pos, t| {
+        app.pointer(PointerEvent { id: 7, kind: PointerKind::Touch, phase, pos, pressure: 1.0, time: t, button: MouseButton::Primary })
+    };
+    touch(&mut app, Phase::Down, [400.0, 250.0], 10.0);
+    for k in 1..=10 {
+        touch(&mut app, Phase::Move, [400.0, 250.0 - k as f64 * 6.0], 10.0 + k as f64 * 0.02);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300)); // let the fingers "rest": no fling
+    touch(&mut app, Phase::Up, [400.0, 190.0], 11.0);
+    assert_eq!(app.doc.len(), 1, "nothing drawn");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 400, 140) && !dark(&px, 400, 200), "the drawing moved up by 60 px");
+}

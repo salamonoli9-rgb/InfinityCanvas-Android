@@ -10,6 +10,8 @@ use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 pub enum Tool {
     Pen,
     Eraser,
+    /// One finger moves the view (nothing is drawn): for showing a drawing around.
+    Hand,
 }
 
 pub struct ToolState {
@@ -180,7 +182,7 @@ fn colors(ui: &mut egui::Ui, s: &mut ToolState) {
 
 fn size_slider(ui: &mut egui::Ui, s: &mut ToolState, label: bool) {
     let (value, range, decimals, text) = match s.tool {
-        Tool::Pen => (&mut s.width, 0.5..=64.0, 1, "grubość"),
+        Tool::Pen | Tool::Hand => (&mut s.width, 0.5..=64.0, 1, "grubość"),
         Tool::Eraser => (&mut s.eraser, 4.0..=160.0, 0, "rozmiar"),
     };
     let slider = egui::Slider::new(value, range).logarithmic(true).max_decimals(decimals);
@@ -190,6 +192,11 @@ fn size_slider(ui: &mut egui::Ui, s: &mut ToolState, label: bool) {
 fn history_buttons(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
     a.undo |= ui.add_enabled(info.can_undo, egui::Button::new("Cofnij")).clicked();
     a.redo |= ui.add_enabled(info.can_redo, egui::Button::new("Ponów")).clicked();
+}
+
+fn hand_button(ui: &mut egui::Ui, s: &mut ToolState) {
+    ui.selectable_value(&mut s.tool, Tool::Hand, "Przesuń")
+        .on_hover_text("Jeden palec przesuwa płótno, nic nie rysuje. Dwa stuknięcia i przeciągnięcie w górę/dół – zoom.");
 }
 
 fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
@@ -280,6 +287,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                 });
                 ui.horizontal_wrapped(|ui| {
                     colors(ui, s);
+                    hand_button(ui, s);
                     photos_button(ui, &mut a);
                 });
                 ui.horizontal(|ui| {
@@ -295,6 +303,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     menu_button(ui, &mut a);
                     ui.separator();
                     tool_buttons(ui, s);
+                    hand_button(ui, s);
                     ui.separator();
                     colors(ui, s);
                     ui.separator();

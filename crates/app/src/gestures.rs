@@ -77,6 +77,8 @@ enum Mode {
     Idle,
     Draw { id: u64, started: f64 },
     Pan { id: u64 },
+    /// Double-tap, then drag up/down: zoom around where the second tap landed.
+    Zoom1 { id: u64, anchor: [f64; 2] },
     Pinch { a: u64, b: u64 },
     /// Wait until every finger is lifted (after a pinch).
     Blocked,
@@ -87,6 +89,11 @@ const CANCEL_WINDOW: f64 = 0.25;
 /// Two fingers must twist this much (radians, ~10°) before the view starts rotating, so plain
 /// pinch-zooming never tilts the canvas by accident.
 const ROTATE_THRESHOLD: f64 = 0.17;
+/// Double tap: the second tap within this time (s) and distance (px) of the first.
+const DOUBLE_TAP_TIME: f64 = 0.35;
+const DOUBLE_TAP_DIST: f64 = 60.0;
+/// One-finger zoom: dragging this many px doubles / halves the zoom.
+const ZOOM1_PX_PER_OCTAVE: f64 = 150.0;
 
 pub struct Gestures {
     pointers: HashMap<u64, Tracked>,
@@ -101,6 +108,13 @@ pub struct Gestures {
     /// Twist accumulated before rotation engages (see `ROTATE_THRESHOLD`).
     twist: f64,
     rotating: bool,
+    /// "Move" tool: one finger / the pen / the mouse moves the view instead of drawing.
+    pub pan_only: bool,
+    /// Where and when the current one-finger pan started, and how far it travelled.
+    pan_start: ([f64; 2], f64),
+    pan_travel: f64,
+    /// The last quick tap (for double-tap-and-drag zoom).
+    last_tap: Option<(f64, [f64; 2])>,
 }
 
 impl Default for Gestures {
@@ -117,6 +131,10 @@ impl Default for Gestures {
             last_angle: 0.0,
             twist: 0.0,
             rotating: false,
+            pan_only: false,
+            pan_start: ([0.0; 2], 0.0),
+            pan_travel: 0.0,
+            last_tap: None,
         }
     }
 }
@@ -158,6 +176,25 @@ impl Gestures {
         self.mode = Mode::Pinch { a, b };
     }
 
+    /// One pointer moves the view ("Move" tool): pan, or zoom after a double tap.
+    fn begin_pan_only(&mut self, e: &PointerEvent) {
+        self.last_time = e.time;
+        self.velocity = [0.0; 2];
+        self.zoom_velocity = 0.0;
+        let double = self
+            .last_tap
+            .is_some_and(|(t, p)| e.time - t < DOUBLE_TAP_TIME && ((e.pos[0] - p[0]).powi(2) + (e.pos[1] - p[1]).powi(2)).sqrt() < DOUBLE_TAP_DIST);
+        self.last_tap = None;
+        if double {
+            self.mode = Mode::Zoom1 { id: e.id, anchor: e.pos };
+            self.last_center = e.pos;
+        } else {
+            self.mode = Mode::Pan { id: e.id };
+            self.pan_start = (e.pos, e.time);
+            self.pan_travel = 0.0;
+        }
+    }
+
     fn track_velocity(&mut self, delta: [f64; 2], dlog: f64, time: f64) {
         let dt = (time - self.last_time).clamp(1e-3, 0.1);
         self.last_time = time;
@@ -185,6 +222,7 @@ impl Gestures {
                 out.push(Gesture::Stop);
                 self.pointers.insert(e.id, Tracked { kind: e.kind, pos: e.pos });
                 match e.kind {
+                    _ if self.pan_only && self.mode == Mode::Idle && self.pointers.len() == 1 => self.begin_pan_only(e),
                     PointerKind::Pen | PointerKind::PenEraser => {
                         // The pen always wins: drop whatever the fingers were doing.
                         if let Mode::Draw { .. } = self.mode {
@@ -233,7 +271,7 @@ impl Gestures {
                                 }
                                 self.start_pinch(id, e.id, e.time);
                             }
-                            Mode::Pan { id } if self.pointers.get(&id).map(|t| t.kind) == Some(PointerKind::Touch) => {
+                            Mode::Pan { id } | Mode::Zoom1 { id, .. } if self.pointers.get(&id).map(|t| t.kind) == Some(PointerKind::Touch) => {
                                 self.start_pinch(id, e.id, e.time);
                             }
                             Mode::Idle | Mode::Blocked if touches.len() >= 2 => {
@@ -255,8 +293,15 @@ impl Gestures {
                     Mode::Pan { id } if id == e.id => {
                         let delta = [e.pos[0] - prev[0], e.pos[1] - prev[1]];
                         self.last_center = e.pos;
+                        self.pan_travel += delta[0].hypot(delta[1]);
                         self.track_velocity(delta, 0.0, e.time);
                         out.push(Gesture::Pan { delta });
+                    }
+                    Mode::Zoom1 { id, anchor } if id == e.id => {
+                        // Down = closer, up = farther, around the double-tap point.
+                        let dlog = (e.pos[1] - prev[1]) / ZOOM1_PX_PER_OCTAVE;
+                        self.track_velocity([0.0; 2], dlog, e.time);
+                        out.push(Gesture::Zoom { center: anchor, dlog });
                     }
                     Mode::Pinch { a, b } if a == e.id || b == e.id => {
                         let (pa, pb) = (self.pointers[&a].pos, self.pointers[&b].pos);
@@ -295,6 +340,15 @@ impl Gestures {
                         self.mode = if self.touches().is_empty() { Mode::Idle } else { Mode::Blocked };
                     }
                     Mode::Pan { id } if id == e.id => {
+                        // A short, still touch is a tap (the first half of a double tap).
+                        let tap = self.pan_travel < 12.0 && e.time - self.pan_start.1 < 0.3;
+                        self.last_tap = tap.then_some((e.time, self.pan_start.0));
+                        if !tap && let Some(f) = self.fling(e.time) {
+                            out.push(f);
+                        }
+                        self.mode = if self.touches().is_empty() { Mode::Idle } else { Mode::Blocked };
+                    }
+                    Mode::Zoom1 { id, .. } if id == e.id => {
                         if let Some(f) = self.fling(e.time) {
                             out.push(f);
                         }
@@ -386,5 +440,33 @@ mod tests {
         out.clear();
         g.handle(&ev(1, PointerKind::Touch, Phase::Up, [100.0, 500.0], 0.3), &mut out);
         assert!(out.iter().any(|g| matches!(g, Gesture::PinchEnd { .. })));
+    }
+
+    #[test]
+    fn move_tool_pans_and_double_tap_drag_zooms() {
+        let mut g = Gestures { pan_only: true, ..Default::default() };
+        let mut out = Vec::new();
+        // One finger drag: pans, never draws.
+        g.handle(&ev(1, PointerKind::Touch, Phase::Down, [100.0, 100.0], 0.0), &mut out);
+        g.handle(&ev(1, PointerKind::Touch, Phase::Move, [130.0, 90.0], 0.05), &mut out);
+        g.handle(&ev(1, PointerKind::Touch, Phase::Up, [130.0, 90.0], 0.3), &mut out);
+        assert!(out.iter().any(|x| matches!(x, Gesture::Pan { delta } if *delta == [30.0, -10.0])));
+        assert!(!out.iter().any(|x| matches!(x, Gesture::StrokeBegin { .. })));
+        // The pen pans too.
+        out.clear();
+        g.handle(&ev(2, PointerKind::Pen, Phase::Down, [10.0, 10.0], 1.0), &mut out);
+        g.handle(&ev(2, PointerKind::Pen, Phase::Move, [20.0, 10.0], 1.05), &mut out);
+        g.handle(&ev(2, PointerKind::Pen, Phase::Up, [20.0, 10.0], 1.3), &mut out);
+        assert!(out.iter().any(|x| matches!(x, Gesture::Pan { .. })) && !out.iter().any(|x| matches!(x, Gesture::StrokeBegin { .. })));
+        // Tap, then tap again and drag down 150 px: zoom in by one octave around the tap.
+        out.clear();
+        g.handle(&ev(3, PointerKind::Touch, Phase::Down, [200.0, 300.0], 2.0), &mut out);
+        g.handle(&ev(3, PointerKind::Touch, Phase::Up, [200.0, 300.0], 2.1), &mut out);
+        g.handle(&ev(4, PointerKind::Touch, Phase::Down, [205.0, 302.0], 2.25), &mut out);
+        g.handle(&ev(4, PointerKind::Touch, Phase::Move, [205.0, 377.0], 2.3), &mut out);
+        g.handle(&ev(4, PointerKind::Touch, Phase::Move, [205.0, 452.0], 2.35), &mut out);
+        let zoom: f64 = out.iter().filter_map(|x| if let Gesture::Zoom { center, dlog } = x { assert_eq!(*center, [205.0, 302.0]); Some(*dlog) } else { None }).sum();
+        assert!((zoom - 1.0).abs() < 1e-9, "{zoom}");
+        assert!(!out.iter().any(|x| matches!(x, Gesture::Pan { .. })));
     }
 }

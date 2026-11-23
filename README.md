@@ -148,6 +148,7 @@ rozdzielczości ekranu: na telefonie w galerii (Obrazy → „Nieskończone pł�
 | przesuwanie + zoom | dwa palce (szczypanie wokół środka gestu), z bezwładnością po puszczeniu |
 | obrót | przekręcenie dwoma palcami (zaczyna się po ~10°, żeby zwykłe szczypanie nie obracało); blisko pionu (< 6°) płótno samo się prostuje; przycisk z kątem na pasku – wyprostuj |
 | gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika – ściera dokładnie ślad gumki (okrągły, wektorowy, ostry przy każdym zoomie); kreski dorysowane później nie są ścierane |
+| narzędzie **Przesuń** (pasek, obok kolorów) | jeden palec / rysik przesuwa płótno i nic nie rysuje; dwa stuknięcia + przeciągnięcie w dół/górę = zoom (jak w Mapach) – wygodne do pokazywania i nagrywania |
 | palm rejection | po pierwszym użyciu rysika palce już nie rysują – jeden palec przesuwa płótno |
 
 Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy dołoży się drugi palec
