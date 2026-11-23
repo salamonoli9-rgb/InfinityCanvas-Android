@@ -14,6 +14,8 @@ pub enum Tool {
     Hand,
     /// Lasso selection: select strokes, then move / scale / delete / duplicate / recolour them.
     Select,
+    /// Tap to place vector text.
+    Text,
 }
 
 pub struct ToolState {
@@ -26,6 +28,8 @@ pub struct ToolState {
     pub width: f32,
     /// Remembered width of every other brush.
     widths: HashMap<Brush, f32>,
+    /// Text height in logical points.
+    pub text_size: f32,
     /// Sample of how each brush draws (shown in the brush menu), and the colour they were made in.
     pub previews: HashMap<Brush, egui::TextureHandle>,
     pub previews_color: Option<Color32>,
@@ -79,6 +83,7 @@ impl Default for ToolState {
             widths: HashMap::new(),
             previews: HashMap::new(),
             previews_color: None,
+            text_size: 32.0,
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
             eraser: 24.0,
@@ -209,6 +214,7 @@ fn colors(ui: &mut egui::Ui, s: &mut ToolState) {
 fn size_slider(ui: &mut egui::Ui, s: &mut ToolState, label: bool) {
     let (value, range, decimals, text) = match s.tool {
         Tool::Pen | Tool::Hand | Tool::Select => (&mut s.width, 0.5..=64.0, 1, "grubość"),
+        Tool::Text => (&mut s.text_size, 8.0..=240.0, 0, "rozmiar tekstu"),
         Tool::Eraser => (&mut s.eraser, 4.0..=160.0, 0, "rozmiar"),
     };
     let slider = egui::Slider::new(value, range).logarithmic(true).max_decimals(decimals);
@@ -222,6 +228,7 @@ fn history_buttons(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
 
 fn hand_button(ui: &mut egui::Ui, s: &mut ToolState) {
     ui.selectable_value(&mut s.tool, Tool::Select, "Zaznacz").on_hover_text("Obrysuj kreski palcem, potem przeciągnij je albo zmień rozmiar uchwytem w rogu");
+    ui.selectable_value(&mut s.tool, Tool::Text, "Tekst").on_hover_text("Stuknij w płótno, żeby wpisać tekst (wektorowy)");
     ui.selectable_value(&mut s.tool, Tool::Hand, "Przesuń")
         .on_hover_text("Jeden palec przesuwa płótno, nic nie rysuje. Dwa stuknięcia i przeciągnięcie w górę/dół – zoom.");
 }
@@ -880,6 +887,58 @@ pub fn selection_bar(ctx: &egui::Context, count: usize) -> (Option<SelectionActi
         });
     });
     (out, r.response.rect)
+}
+
+#[derive(Default)]
+pub struct TextPanel {
+    pub open: bool,
+    /// Screen point where the text goes (its top-left corner).
+    pub pos: [f64; 2],
+    pub text: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum TextAction {
+    Add,
+    Cancel,
+}
+
+/// Typing the text to place.
+pub fn text_window(ctx: &egui::Context, st: &mut TextPanel, size: &mut f32, safe_top: f32) -> Option<TextAction> {
+    if !st.open {
+        return None;
+    }
+    let mut out = None;
+    let width = (ctx.content_rect().width() - 16.0).min(440.0);
+    let mut open = true;
+    egui::Window::new("Tekst")
+        .id(egui::Id::unique("text"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top])
+        .fixed_size([width, 0.0])
+        .show(ctx, |ui| {
+            ui.set_width(width - 16.0);
+            let r = ui.add(egui::TextEdit::multiline(&mut st.text).desired_rows(3).desired_width(f32::INFINITY).hint_text("Wpisz tekst…"));
+            if !r.has_focus() && st.text.is_empty() {
+                r.request_focus();
+            }
+            ui.add(egui::Slider::new(size, 8.0..=240.0).logarithmic(true).max_decimals(0).text("rozmiar"));
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!st.text.trim().is_empty(), egui::Button::new("Dodaj")).clicked() {
+                    out = Some(TextAction::Add);
+                }
+                if ui.button("Anuluj").clicked() {
+                    out = Some(TextAction::Cancel);
+                }
+            });
+            ui.label(egui::RichText::new("Tekst jest wektorowy: ostry przy każdym zoomie, w aktualnym kolorze.").small().weak());
+        });
+    if !open {
+        out = Some(TextAction::Cancel);
+    }
+    out
 }
 
 /// While recording: a red button with the time; tapping it stops the recording.

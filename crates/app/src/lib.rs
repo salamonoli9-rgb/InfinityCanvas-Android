@@ -8,6 +8,7 @@ pub mod projects;
 pub mod render;
 pub mod selection;
 pub mod shapes;
+pub mod text;
 pub mod ui;
 pub mod video;
 

@@ -1160,3 +1160,32 @@ fn recording_the_canvas() {
     assert!(img.get_pixel(300, 200).0[0] < 100, "line in the last frame");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn vector_text() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.color = egui::Color32::from_rgb(20, 20, 160);
+    let pos = [300.0, 140.0];
+    assert!(app.add_text("O", pos, 120.0));
+    assert_eq!(app.doc.len(), 1, "the whole text is one shape");
+    // Where the letter's outer and inner (hole) outlines are.
+    let loops = infinite_canvas::text::outline("O", 120.0, pos);
+    let bb = |l: &Vec<[f64; 2]>| {
+        let xs = l.iter().map(|p| p[0]);
+        let ys = l.iter().map(|p| p[1]);
+        [xs.clone().fold(f64::MAX, f64::min), ys.clone().fold(f64::MAX, f64::min), xs.fold(f64::MIN, f64::max), ys.fold(f64::MIN, f64::max)]
+    };
+    let (outer, inner) = (bb(&loops[0]), bb(&loops[1]));
+    let px = gpu.frame(&mut app);
+    let blue = |x: f64, y: f64| { let i = ((y as u32 * W + x as u32) * 4) as usize; px[i + 2] > 120 && px[i] < 80 };
+    let cy = (inner[1] + inner[3]) * 0.5;
+    assert!(blue((outer[0] + inner[0]) * 0.5, cy), "the ring of the O is filled");
+    assert!(!blue((inner[0] + inner[2]) * 0.5, cy), "its hole is empty");
+    assert!(!blue(outer[2] + 8.0, cy), "nothing outside");
+    app.undo();
+    assert_eq!(app.doc.len(), 0);
+}

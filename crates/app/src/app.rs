@@ -139,6 +139,7 @@ pub struct CanvasApp {
     /// Screen recording in progress, and a finished one being written.
     recording: Option<Recording>,
     recording_saving: Option<crate::video::VideoJob>,
+    text_panel: ui::TextPanel,
     /// Selected strokes (Select tool) and what the finger is doing with them.
     selection: Vec<canvas_core::stroke::StrokeId>,
     sel_drag: Option<SelDrag>,
@@ -401,6 +402,7 @@ impl CanvasApp {
             active_layer: 0,
             urgent: Vec::new(),
             content_rev: 0,
+            text_panel: ui::TextPanel::default(),
             selection: Vec::new(),
             sel_drag: None,
             video_factory: None,
@@ -602,6 +604,10 @@ impl CanvasApp {
         }
         if self.image_edit.is_some() {
             self.finish_image_edit();
+            return true;
+        }
+        if self.text_panel.open {
+            self.text_panel.open = false;
             return true;
         }
         if self.bookmark_panel.open || self.layer_panel.open {
@@ -1006,6 +1012,39 @@ impl CanvasApp {
     /// Selected stroke ids (Select tool).
     pub fn selection(&self) -> &[canvas_core::stroke::StrokeId] {
         &self.selection
+    }
+
+    /// Places `text` with its top-left corner at screen point `pos`, `size` px tall, as one
+    /// filled vector shape (letters with their holes) in the current colour.
+    pub fn add_text(&mut self, text: &str, pos: [f64; 2], size: f64) -> bool {
+        let loops = crate::text::outline(text, size, pos);
+        if loops.is_empty() {
+            return false;
+        }
+        let level = self.camera.level();
+        let w = self.camera.screen_to_world(pos, self.viewport).mul_pow2(level);
+        let anchor = [w.x.floor_at(0), w.y.floor_at(0)];
+        let frame = self.camera.level_frame(level, self.viewport);
+        let c = self.tools.color;
+        // A thin outline of the letters' own colour keeps their edges crisp at any zoom.
+        let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [c.r(), c.g(), c.b(), c.a()], (size * 0.004 / frame.scale) as f32);
+        s.brush = Brush::Fill;
+        s.layer = self.active_layer;
+        for (i, l) in loops.iter().enumerate() {
+            if i > 0 {
+                let last = *s.points.last().expect("previous loop");
+                s.points.push(StrokePoint { pressure: Stroke::SUBPATH_BREAK, ..last });
+            }
+            for p in l {
+                let q = frame.screen_to_local(*p, &anchor, None);
+                s.points.push(StrokePoint { x: q[0] as f32, y: q[1] as f32, pressure: 1.0 });
+            }
+        }
+        s.refresh_cache();
+        self.urgent.push(s.id);
+        self.history.apply(&mut self.doc, Action::Add(vec![s]));
+        self.changed();
+        true
     }
 
     /// How videos are encoded on this platform (set by the launcher).
@@ -1516,6 +1555,18 @@ impl CanvasApp {
         if self.tools.tool == Tool::Select && self.apply_select(&g) {
             return;
         }
+        if self.tools.tool == Tool::Text {
+            match g {
+                Gesture::StrokeBegin { pos, .. } => {
+                    self.text_panel.open = true;
+                    self.text_panel.pos = pos;
+                    self.wants_redraw = true;
+                    return;
+                }
+                Gesture::StrokeMove { .. } | Gesture::StrokeEnd | Gesture::StrokeCancel => return,
+                _ => {}
+            }
+        }
         match g {
             Gesture::StrokeBegin { pos, pressure, time, erase } => {
                 let eraser = erase || self.tools.tool == Tool::Eraser;
@@ -1839,6 +1890,7 @@ impl CanvasApp {
         let mut finish_edit = false;
         let mut sel_action = None;
         let mut stop_recording = false;
+        let mut text_action = None;
         let mut toast_visible = false;
         let mut rects = Vec::new();
         let lib_busy = self.photo_lib.as_mut().is_some_and(|l| l.poll());
@@ -1896,6 +1948,10 @@ impl CanvasApp {
                 toast_visible = true;
             }
             if self.video.is_some() {
+                r.push(egui::Rect::EVERYTHING);
+            }
+            text_action = ui::text_window(ui.ctx(), &mut self.text_panel, &mut self.tools.text_size, self.safe_top);
+            if self.text_panel.open {
                 r.push(egui::Rect::EVERYTHING);
             }
             if let Some(rec) = &self.recording {
@@ -1979,6 +2035,18 @@ impl CanvasApp {
         if actions.bookmarks {
             self.bookmark_panel.open = !self.bookmark_panel.open;
             self.photo_panel.open = false;
+        }
+        match text_action {
+            Some(ui::TextAction::Add) => {
+                let text = std::mem::take(&mut self.text_panel.text);
+                let size = self.tools.text_size as f64 * self.pixels_per_point as f64;
+                self.text_panel.open = false;
+                if !self.add_text(&text, self.text_panel.pos, size) {
+                    self.toast = Some(("Nie udało się dodać tekstu".into(), Instant::now()));
+                }
+            }
+            Some(ui::TextAction::Cancel) => self.text_panel.open = false,
+            None => {}
         }
         if actions.record || stop_recording {
             self.toggle_recording();

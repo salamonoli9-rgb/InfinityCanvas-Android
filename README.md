@@ -171,6 +171,7 @@ rozdzielczości ekranu: na telefonie w galerii (Obrazy → „Nieskończone pł�
 | gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika – ściera dokładnie ślad gumki (okrągły, wektorowy, ostry przy każdym zoomie); kreski dorysowane później nie są ścierane |
 | narzędzie **Przesuń** (pasek, obok kolorów) | jeden palec / rysik przesuwa płótno i nic nie rysuje; dwa stuknięcia + przeciągnięcie w dół/górę = zoom (jak w Mapach) – wygodne do pokazywania i nagrywania |
 | narzędzie **Zaznacz** (pasek, obok kolorów) | obrysuj kreski palcem (lasso); przeciągnij ramkę – przesunięcie, uchwyt w prawym dolnym rogu – zmiana rozmiaru; pasek na dole: Usuń / Duplikuj / Kolor (aktualny) / Gotowe; każda zmiana to jedno „Cofnij” |
+| narzędzie **Tekst** | stuknij w płótno, wpisz tekst (kilka linii), ustaw rozmiar → litery jako wektorowe kształty w aktualnym kolorze (ostre przy każdym zoomie; zaznaczanie, gumka, cofanie działają jak na kreskach) |
 | palm rejection | po pierwszym użyciu rysika palce już nie rysują – jeden palec przesuwa płótno |
 
 Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy dołoży się drugi palec
