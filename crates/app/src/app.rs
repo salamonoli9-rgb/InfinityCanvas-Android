@@ -124,6 +124,9 @@ pub struct CanvasApp {
     pub active_layer: u32,
     /// Strokes added since the last frame (rendered without delay).
     urgent: Vec<canvas_core::stroke::StrokeId>,
+    video_factory: Option<crate::video::VideoFactory>,
+    /// Video export in progress.
+    video: Option<VideoExport>,
     /// Bumped on every change of what is drawn (strokes, photos, layers).
     content_rev: u64,
     /// What the renderer's scene cache holds.
@@ -184,6 +187,14 @@ impl FrameStats {
             *self = Self::default();
         }
     }
+}
+
+struct VideoExport {
+    cams: Vec<Camera>,
+    next: usize,
+    size: [u32; 2],
+    job: crate::video::VideoJob,
+    finishing: bool,
 }
 
 /// The scene cache: a full render (with a margin around the screen) at `cam`.
@@ -284,6 +295,8 @@ impl CanvasApp {
             active_layer: 0,
             urgent: Vec::new(),
             content_rev: 0,
+            video_factory: None,
+            video: None,
             cache: None,
             last_cam: None,
             last_move: Instant::now(),
@@ -469,6 +482,11 @@ impl CanvasApp {
     /// Returns whether it was handled (otherwise the app may close).
     pub fn back(&mut self) -> bool {
         self.wants_redraw = true;
+        if self.video.take().is_some() {
+            // Dropping the job closes the encoder without finishing the file properly.
+            self.toast = Some(("Eksport wideo anulowany".into(), Instant::now()));
+            return true;
+        }
         if self.image_edit.is_some() {
             self.finish_image_edit();
             return true;
@@ -680,6 +698,10 @@ impl CanvasApp {
                 self.doc.bookmarks.push(Bookmark { name: format!("Zakładka {n}"), camera: self.camera.clone() });
                 self.toast = Some((format!("Dodano „Zakładka {n}”"), Instant::now()));
             }
+            ui::BookmarkAction::ExportVideo => {
+                self.start_video();
+                return;
+            }
             ui::BookmarkAction::Go(i) => {
                 if let Some(b) = self.doc.bookmarks.get(i) {
                     self.inertia = Inertia::default();
@@ -754,6 +776,98 @@ impl CanvasApp {
             }
         }
         self.changed();
+    }
+
+    /// How videos are encoded on this platform (set by the launcher).
+    pub fn set_video_factory(&mut self, f: crate::video::VideoFactory) {
+        self.video_factory = Some(f);
+    }
+
+    /// Starts exporting a video of a flight through the bookmarks.
+    pub fn start_video(&mut self) {
+        let Some(factory) = self.video_factory.clone() else {
+            self.toast = Some(("Eksport wideo nie jest dostępny na tym urządzeniu".into(), Instant::now()));
+            return;
+        };
+        if self.doc.bookmarks.len() < 2 {
+            self.toast = Some(("Dodaj co najmniej 2 zakładki".into(), Instant::now()));
+            return;
+        }
+        let size = crate::video::size_for(self.viewport);
+        let cams = crate::video::timeline(&self.doc.bookmarks, self.viewport, size);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let base = if self.project.is_empty() { "rysunek".to_string() } else { self.project.clone() };
+        let job = crate::video::VideoJob::start(factory, format!("{base}-{stamp}"), size);
+        self.video = Some(VideoExport { cams, next: 0, size, job, finishing: false });
+        self.bookmark_panel.open = false;
+        self.wants_redraw = true;
+    }
+
+    /// Whether a video is being exported.
+    pub fn exporting_video(&self) -> bool {
+        self.video.is_some()
+    }
+
+    /// Renders the next video frames (a few per screen frame) and checks for the result.
+    fn step_video(&mut self, target: Target, renderer: &mut Renderer) {
+        let Some(mut v) = self.video.take() else { return };
+        if let Some(r) = v.job.poll() {
+            self.toast = Some((
+                match r {
+                    Ok(place) => format!("Zapisano wideo: {place}"),
+                    Err(e) => format!("Wideo nie powstało: {e}"),
+                },
+                Instant::now(),
+            ));
+            return;
+        }
+        if !v.finishing {
+            let (device, queue, format) = target.device_queue_format();
+            let start = Instant::now();
+            let layer_opacity: Vec<f32> = self.doc.layers.iter().map(|l| l.opacity).collect();
+            self.decode_images();
+            while v.next < v.cams.len() && start.elapsed() < Duration::from_millis(40) {
+                let cam = &v.cams[v.next];
+                let vvp = [v.size[0] as f64, v.size[1] as f64];
+                let visible = self.doc.query(cam, vvp, [0.0, 0.0, vvp[0], vvp[1]]);
+                let images = self.image_draws(cam, vvp);
+                let px = renderer.render_rgba(
+                    device,
+                    queue,
+                    format,
+                    v.size,
+                    FrameInput {
+                        visible: &visible,
+                        doc: &self.doc,
+                        active: None,
+                        scene: None,
+                        images: &images,
+                        layer_opacity: &layer_opacity,
+                        urgent: &[],
+                        log_zoom: cam.log_zoom,
+                        rotation: cam.rot(),
+                        background: BACKGROUND,
+                        egui: None,
+                        textures: Default::default(),
+                    },
+                );
+                if !v.job.push(px) {
+                    v.finishing = true;
+                    v.job.finish();
+                    break;
+                }
+                v.next += 1;
+            }
+            if v.next >= v.cams.len() {
+                v.finishing = true;
+                v.job.finish();
+            }
+        }
+        let pct = (100 * v.next / v.cams.len().max(1)).min(100);
+        let msg = if v.finishing { "Zapisywanie wideo…".to_string() } else { format!("Eksport wideo: {pct}% (Wstecz – anuluj)") };
+        self.toast = Some((msg, Instant::now()));
+        self.video = Some(v);
+        self.wants_redraw = true;
     }
 
     /// Flies to bookmark `i` (smooth zoom out → travel → zoom in).
@@ -1399,6 +1513,7 @@ impl CanvasApp {
         if let Some(pos) = self.pending_bucket.take() {
             self.bucket_fill(target, renderer, pos);
         }
+        self.step_video(target, renderer);
         if std::mem::take(&mut self.pending_export) {
             self.export_png(target, renderer);
         }
@@ -1481,6 +1596,9 @@ impl CanvasApp {
             {
                 ui::toast(ui.ctx(), msg);
                 toast_visible = true;
+            }
+            if self.video.is_some() {
+                r.push(egui::Rect::EVERYTHING);
             }
             if self.image_edit.is_some() && ui::image_edit_bar(ui.ctx()).0 {
                 finish_edit = true;

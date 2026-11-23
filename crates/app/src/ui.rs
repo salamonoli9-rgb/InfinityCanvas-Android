@@ -614,6 +614,8 @@ pub struct BookmarkPanel {
 #[derive(Debug, PartialEq)]
 pub enum BookmarkAction {
     Add,
+    /// Video of a flight through all bookmarks, in order.
+    ExportVideo,
     Go(usize),
     Rename(usize, String),
     Delete(usize),
@@ -638,9 +640,19 @@ pub fn bookmarks_window(ctx: &egui::Context, st: &mut BookmarkPanel, names: &[St
         .fixed_size([width, 0.0])
         .show(ctx, |ui| {
             ui.set_width(width - 16.0);
-            if ui.button("Dodaj zakładkę (obecny widok)").clicked() {
-                out.push(BookmarkAction::Add);
-            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Dodaj zakładkę (obecny widok)").clicked() {
+                    out.push(BookmarkAction::Add);
+                }
+                if ui
+                    .add_enabled(names.len() >= 2, egui::Button::new("Wideo MP4"))
+                    .on_hover_text("Film z przelotem przez zakładki po kolei")
+                    .on_disabled_hover_text("Potrzebne są co najmniej 2 zakładki")
+                    .clicked()
+                {
+                    out.push(BookmarkAction::ExportVideo);
+                }
+            });
             if names.is_empty() {
                 ui.label(egui::RichText::new("Zakładka zapamiętuje miejsce, przybliżenie i obrót. Stuknij ją, żeby tam przelecieć.").weak());
             }

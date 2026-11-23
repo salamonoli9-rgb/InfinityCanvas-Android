@@ -134,6 +134,11 @@ Stuknięcie zakładki (lub „Leć”) płynnie przenosi kamerę: oddalenie, prz
 między miejscami odległymi o wiele rzędów wielkości, z dokładnym lądowaniem. Dotknięcie ekranu
 przerywa lot. Zakładki zapisują się w projekcie.
 
+**Wideo MP4** (w oknie Zakładki, od 2 zakładek): film z przelotem przez zakładki po kolei (postój
+na każdej, płynny lot między nimi), 768 px szerokości, 30 kl./s, proporcje ekranu. Na telefonie
+kodowany sprzętowo (MediaCodec H.264) i zapisywany w galerii (Filmy → „Nieskończone płótno”), na
+komputerze przez `ffmpeg` do `~/Wideo/Nieskończone płótno/`. Postęp widać na dole; „Wstecz” anuluje.
+
 ### Eksport
 
 **Więcej → Eksport do PNG** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej

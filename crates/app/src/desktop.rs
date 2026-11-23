@@ -239,6 +239,7 @@ pub fn run() {
     };
     let mut app = app;
     app.set_photo_backend(Box::new(crate::photos::FolderPhotos::default_dirs()));
+    app.set_video_factory(crate::video::ffmpeg_factory());
     let event_loop = EventLoop::new().expect("cannot create event loop");
     let mut d = Desktop {
         app,

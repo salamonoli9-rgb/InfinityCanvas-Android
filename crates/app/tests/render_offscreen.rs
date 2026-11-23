@@ -959,3 +959,45 @@ fn move_tool_pans_with_one_finger() {
     let px = gpu.frame(&mut app);
     assert!(dark(&px, 400, 140) && !dark(&px, 400, 200), "the drawing moved up by 60 px");
 }
+
+#[test]
+fn video_of_a_flight_through_bookmarks() {
+    if std::process::Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("no ffmpeg: skipping");
+        return;
+    }
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("icnv-video-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = new_app();
+    app.set_video_factory(infinite_canvas::video::ffmpeg_factory_in(dir.clone()));
+    draw_line(&mut app, 200.0, 300.0, 500.0);
+    app.add_bookmark();
+    app.pan([-3000.0, 0.0]);
+    app.wheel_zoom([384.0, 150.0], 3.0);
+    draw_line(&mut app, 200.0, 300.0, 500.0);
+    app.add_bookmark();
+    app.start_video();
+    let start = std::time::Instant::now();
+    while app.exporting_video() && start.elapsed().as_secs() < 120 {
+        gpu.frame_once(&mut app);
+    }
+    assert!(!app.exporting_video(), "finished");
+    let file = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "mp4")).expect("an mp4");
+    let probe = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=width,height,nb_read_frames,codec_name", "-of", "csv=p=0"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    eprintln!("video: {info}");
+    let parts: Vec<&str> = info.split(',').collect();
+    assert_eq!(parts[0], "h264");
+    assert_eq!((parts[1], parts[2]), ("768", "304"), "768 wide, screen aspect (768×300 → height rounded to 16)");
+    let frames: usize = parts[3].parse().unwrap();
+    assert!(frames > 2 * 24 + 30, "{frames} frames: holds + flight");
+    std::fs::remove_dir_all(dir).unwrap();
+}

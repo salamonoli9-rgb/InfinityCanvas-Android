@@ -8,6 +8,7 @@ pub mod projects;
 pub mod render;
 pub mod shapes;
 pub mod ui;
+pub mod video;
 
 #[cfg(not(target_os = "android"))]
 pub mod desktop;
