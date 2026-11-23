@@ -4,6 +4,7 @@
 pub mod camera;
 pub mod coords;
 pub mod document;
+pub mod flight;
 pub mod history;
 pub mod image;
 pub mod io;

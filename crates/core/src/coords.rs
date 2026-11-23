@@ -102,6 +102,22 @@ impl Dyadic {
         ldexp(m.to_i64().unwrap() as f64, e)
     }
 
+    /// Exact product.
+    pub fn mul(&self, o: &Self) -> Self {
+        Self { m: &self.m * &o.m, e: self.e + o.e }
+    }
+
+    /// `log2 |self|`, also for values far outside the f64 range (−∞ for zero).
+    pub fn log2_abs(&self) -> f64 {
+        if self.m.is_zero() {
+            return f64::NEG_INFINITY;
+        }
+        let bits = self.m.bits() as i64;
+        let shift = (bits - 53).max(0);
+        let top = (&self.m >> (shift as u64)).to_i64().unwrap_or(1).unsigned_abs() as f64;
+        top.log2() + (shift + self.e as i64) as f64
+    }
+
     /// Fractional part in [0, 1) as f64 (value minus floor).
     pub fn fract_f64(&self) -> f64 {
         if self.e >= 0 {
@@ -226,5 +242,16 @@ mod tests {
     fn ordering() {
         assert!(Dyadic::from_f64(-1.0) < Dyadic::new(1, -900));
         assert_eq!(Dyadic::new(2, 0), Dyadic::new(1, 1));
+    }
+
+    #[test]
+    fn log2_abs_far_out_of_f64_range() {
+        let d = Dyadic::new(BigInt::from(3), 2000);
+        assert!((d.log2_abs() - (2000.0 + 3f64.log2())).abs() < 1e-9);
+        let d = Dyadic::new(BigInt::from(-1) << 3000u32, -10);
+        assert!((d.log2_abs() - 2990.0).abs() < 1e-9);
+        assert_eq!(Dyadic::zero().log2_abs(), f64::NEG_INFINITY);
+        let p = Dyadic::from_f64(1.5).mul(&Dyadic::from_f64(-0.25));
+        assert_eq!(p.to_f64(), -0.375);
     }
 }

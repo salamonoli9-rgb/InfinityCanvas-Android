@@ -116,6 +116,8 @@ pub struct Document {
     strokes: BTreeMap<StrokeId, Stroke>,
     /// Reference photos, always drawn below the strokes (in id order).
     images: BTreeMap<ImageId, RefImage>,
+    /// Saved views.
+    pub bookmarks: Vec<crate::flight::Bookmark>,
     levels: BTreeMap<i32, LevelIndex>,
     next_id: StrokeId,
 }

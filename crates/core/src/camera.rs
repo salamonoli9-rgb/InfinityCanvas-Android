@@ -88,6 +88,11 @@ impl Camera {
         [d[0] + viewport[0] * 0.5, d[1] + viewport[1] * 0.5]
     }
 
+    /// Drops position precision far below a pixel (keeps numbers small after arithmetic).
+    pub fn normalize(&mut self) {
+        self.trim();
+    }
+
     fn trim(&mut self) {
         let e = -(self.level() + EXTRA_BITS);
         self.center.truncate(e);

@@ -97,7 +97,7 @@ na siebie (bufor stencil).
 
 ### Zdjęcia
 
-Przycisk **Zdjęcia** → **Dodaj zdjęcie** pokazuje siatkę zdjęć z galerii telefonu (za pierwszym
+**Więcej → Zdjęcia…** → **Dodaj zdjęcie** pokazuje siatkę zdjęć z galerii telefonu (za pierwszym
 razem Android pyta o dostęp do zdjęć; na komputerze: obrazy z `~/Obrazy`, `~/Pictures`,
 `~/Pobrane` albo przeciągnięty na okno plik). Po wybraniu:
 
@@ -115,9 +115,16 @@ razem Android pyta o dostęp do zdjęć; na komputerze: obrazy z `~/Obrazy`, `~/
 
 Zdjęcie jest zapisywane w projekcie (JPEG, maks. 2048 px).
 
+### Zakładki
+
+**Więcej → Zakładki…**: „Dodaj zakładkę” zapamiętuje obecny widok (miejsce, przybliżenie, obrót).
+Stuknięcie zakładki (lub „Leć”) płynnie przenosi kamerę: oddalenie, przelot, przybliżenie – także
+między miejscami odległymi o wiele rzędów wielkości, z dokładnym lądowaniem. Dotknięcie ekranu
+przerywa lot. Zakładki zapisują się w projekcie.
+
 ### Eksport
 
-Przycisk **Eksport** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej
+**Więcej → Eksport do PNG** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej
 rozdzielczości ekranu: na telefonie w galerii (Obrazy → „Nieskończone płótno”), na komputerze w
 `~/Obrazy/Nieskończone płótno/`.
 
@@ -148,7 +155,7 @@ jest renderowana z wektorów przy wyjściu z projektu i co ~20 s podczas rysowan
 ## Zapis
 
 Rysunek zapisuje się automatycznie ~1,5 s po każdej zmianie oraz przy wyjściu/wstrzymaniu
-aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 6; starsze wersje nadal się
+aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 7; starsze wersje nadal się
 wczytują), dane w `postcard`. Zapis jest
 atomowy (plik tymczasowy + rename). Uszkodzony plik nie jest nadpisywany – zostaje przemianowany
 na `*.broken`.

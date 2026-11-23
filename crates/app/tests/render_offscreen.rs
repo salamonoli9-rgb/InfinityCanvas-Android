@@ -710,3 +710,30 @@ fn export_saves_a_double_resolution_png() {
     assert!(img.get_pixel(700, 400).0[0] < 100, "line drawn");
     assert!(img.get_pixel(100, 60).0[0] > 200, "no UI in the picture");
 }
+
+#[test]
+fn bookmark_flight_returns_to_the_exact_view() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    draw_line(&mut app, 200.0, 300.0, 500.0);
+    app.add_bookmark();
+    let before = gpu.frame(&mut app);
+    assert!(dark(&before, 400, 200));
+    // Wander off: far away and 2^40 deeper, rotated.
+    app.pan([5.0e5, -2.0e5]);
+    app.wheel_zoom([100.0, 100.0], 40.0);
+    app.wheel_rotate([300.0, 150.0], 1.0);
+    assert!(!dark(&gpu.frame(&mut app), 400, 200));
+    app.fly_to_bookmark(0);
+    let start = std::time::Instant::now();
+    while app.animating() && start.elapsed().as_secs_f64() < 6.0 {
+        gpu.frame(&mut app);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    let after = gpu.frame(&mut app);
+    assert_eq!(app.camera.rotation, 0.0);
+    assert!(dark(&after, 400, 200) && dark(&after, 310, 200) && !dark(&after, 400, 230), "back at the saved view");
+}

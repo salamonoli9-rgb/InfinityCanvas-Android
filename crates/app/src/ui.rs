@@ -97,6 +97,8 @@ pub struct Actions {
     pub photos: bool,
     /// Export the view as a picture.
     pub export: bool,
+    /// Open the bookmarks window.
+    pub bookmarks: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -171,9 +173,23 @@ fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
     a.home |= ui.button("Początek").on_hover_text("Wróć do początku (Home)").clicked();
 }
 
+/// "More": photos, bookmarks, export.
 fn photos_button(ui: &mut egui::Ui, a: &mut Actions) {
-    a.photos |= ui.button("Zdjęcia").on_hover_text("Zdjęcie do odrysowania").clicked();
-    a.export |= ui.button("Eksport").on_hover_text("Zapisz widok jako obraz PNG").clicked();
+    egui::containers::menu::MenuButton::from_button(egui::Button::new("Więcej")).ui(ui, |ui| {
+        ui.set_min_width(190.0);
+        if ui.button("Zdjęcia…").clicked() {
+            a.photos = true;
+            ui.close();
+        }
+        if ui.button("Zakładki…").clicked() {
+            a.bookmarks = true;
+            ui.close();
+        }
+        if ui.button("Eksport do PNG").clicked() {
+            a.export = true;
+            ui.close();
+        }
+    });
 }
 
 fn menu_button(ui: &mut egui::Ui, a: &mut Actions) {
@@ -550,6 +566,89 @@ fn picker(ui: &mut egui::Ui, st: &mut PhotoPanel, lib: Option<&mut crate::photos
             });
         }
     }
+}
+
+#[derive(Default)]
+pub struct BookmarkPanel {
+    pub open: bool,
+    /// Bookmark being renamed, with the text field contents.
+    pub renaming: Option<(usize, String)>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum BookmarkAction {
+    Add,
+    Go(usize),
+    Rename(usize, String),
+    Delete(usize),
+}
+
+/// The bookmarks window: saved views of this drawing; tapping one flies there.
+pub fn bookmarks_window(ctx: &egui::Context, st: &mut BookmarkPanel, names: &[String], safe_top: f32) -> Vec<BookmarkAction> {
+    let mut out = Vec::new();
+    if !st.open {
+        return out;
+    }
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 16.0).min(440.0);
+    let max_h = (screen.height() - safe_top - 140.0).max(200.0);
+    let mut open = true;
+    egui::Window::new("Zakładki")
+        .id(egui::Id::unique("bookmarks"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, [0.0, 8.0 + safe_top])
+        .fixed_size([width, 0.0])
+        .show(ctx, |ui| {
+            ui.set_width(width - 16.0);
+            if ui.button("Dodaj zakładkę (obecny widok)").clicked() {
+                out.push(BookmarkAction::Add);
+            }
+            if names.is_empty() {
+                ui.label(egui::RichText::new("Zakładka zapamiętuje miejsce, przybliżenie i obrót. Stuknij ją, żeby tam przelecieć.").weak());
+            }
+            egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).max_height(max_h).show(ui, |ui| {
+                for (i, name) in names.iter().enumerate() {
+                    ui.separator();
+                    if let Some((j, text)) = st.renaming.as_mut()
+                        && *j == i
+                    {
+                        let mut done = false;
+                        ui.horizontal(|ui| {
+                            let r = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width() - 70.0));
+                            done = ui.button("OK").clicked() || (r.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)));
+                        });
+                        if done {
+                            out.push(BookmarkAction::Rename(i, text.clone()));
+                            st.renaming = None;
+                        }
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(egui::RichText::new(name).strong()).frame(false)).clicked() {
+                            out.push(BookmarkAction::Go(i));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Usuń").clicked() {
+                                out.push(BookmarkAction::Delete(i));
+                            }
+                            if ui.button("Nazwa").clicked() {
+                                st.renaming = Some((i, name.clone()));
+                            }
+                            if ui.button("Leć").clicked() {
+                                out.push(BookmarkAction::Go(i));
+                            }
+                        });
+                    });
+                }
+            });
+        });
+    if !open {
+        st.open = false;
+        st.renaming = None;
+    }
+    out
 }
 
 /// A short message near the bottom of the screen.

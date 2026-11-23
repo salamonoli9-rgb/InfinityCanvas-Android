@@ -116,6 +116,9 @@ pub struct CanvasApp {
     pending_bucket: Option<[f64; 2]>,
     /// Export the view as a picture on the next frame.
     pending_export: bool,
+    bookmark_panel: ui::BookmarkPanel,
+    /// Camera flight to a bookmark in progress, with its start time.
+    flight: Option<(canvas_core::flight::Flight, Instant)>,
     /// Short message at the bottom of the screen, with the time it appeared.
     toast: Option<(String, Instant)>,
     save_thread: Option<std::thread::JoinHandle<()>>,
@@ -244,6 +247,8 @@ impl CanvasApp {
             pending_preview: None,
             pending_bucket: None,
             pending_export: false,
+            bookmark_panel: ui::BookmarkPanel::default(),
+            flight: None,
             toast: None,
             save_thread: None,
             clear_render_cache: false,
@@ -290,6 +295,7 @@ impl CanvasApp {
         self.inertia = Inertia::default();
         self.decoded.clear();
         self.image_edit = None;
+        self.flight = None;
         self.save_path = path;
         self.dirty = false;
         self.clear_render_cache = true;
@@ -419,6 +425,10 @@ impl CanvasApp {
         self.wants_redraw = true;
         if self.image_edit.is_some() {
             self.finish_image_edit();
+            return true;
+        }
+        if self.bookmark_panel.open {
+            self.bookmark_panel.open = false;
             return true;
         }
         if self.photo_panel.open {
@@ -610,6 +620,48 @@ impl CanvasApp {
         self.history.apply(&mut self.doc, Action::Add(strokes));
         self.changed();
         Ok(n)
+    }
+
+    fn bookmark_action(&mut self, a: ui::BookmarkAction) {
+        use canvas_core::flight::{Bookmark, Flight};
+        match a {
+            ui::BookmarkAction::Add => {
+                let n = self.doc.bookmarks.len() + 1;
+                self.doc.bookmarks.push(Bookmark { name: format!("Zakładka {n}"), camera: self.camera.clone() });
+                self.toast = Some((format!("Dodano „Zakładka {n}”"), Instant::now()));
+            }
+            ui::BookmarkAction::Go(i) => {
+                if let Some(b) = self.doc.bookmarks.get(i) {
+                    self.inertia = Inertia::default();
+                    self.flight = Some((Flight::new(&self.camera, &b.camera, self.viewport), Instant::now()));
+                    self.bookmark_panel.open = false;
+                }
+            }
+            ui::BookmarkAction::Rename(i, name) => {
+                let name = name.trim();
+                if let Some(b) = self.doc.bookmarks.get_mut(i)
+                    && !name.is_empty()
+                {
+                    b.name = name.chars().take(60).collect();
+                }
+            }
+            ui::BookmarkAction::Delete(i) => {
+                if i < self.doc.bookmarks.len() {
+                    self.doc.bookmarks.remove(i);
+                }
+            }
+        }
+        self.changed();
+    }
+
+    /// Flies to bookmark `i` (smooth zoom out → travel → zoom in).
+    pub fn fly_to_bookmark(&mut self, i: usize) {
+        self.bookmark_action(ui::BookmarkAction::Go(i));
+    }
+
+    /// Saves the current view as a bookmark.
+    pub fn add_bookmark(&mut self) {
+        self.bookmark_action(ui::BookmarkAction::Add);
     }
 
     /// Exports the view as a picture (on the next frame).
@@ -916,6 +968,7 @@ impl CanvasApp {
             return;
         }
         self.inertia = Inertia::default();
+        self.flight = None;
         self.camera.zoom_at(pos, self.viewport, dlog);
         self.wants_redraw = true;
     }
@@ -1007,7 +1060,10 @@ impl CanvasApp {
             Gesture::Fling { velocity, zoom_velocity, center } => {
                 self.inertia = Inertia { velocity, zoom_velocity: zoom_velocity.clamp(-20.0, 20.0), center };
             }
-            Gesture::Stop => self.inertia = Inertia::default(),
+            Gesture::Stop => {
+                self.inertia = Inertia::default();
+                self.flight = None;
+            }
         }
     }
 
@@ -1153,7 +1209,7 @@ impl CanvasApp {
 
     /// Whether the app needs to keep animating without new input.
     pub fn animating(&self) -> bool {
-        self.wants_redraw || self.inertia.active()
+        self.wants_redraw || self.inertia.active() || self.flight.is_some()
     }
 
     /// Time until the next autosave check is due, if any.
@@ -1182,6 +1238,16 @@ impl CanvasApp {
                 self.dirty = true;
                 self.last_change = Instant::now();
             }
+        }
+
+        if let Some((f, start)) = &self.flight {
+            let t = start.elapsed().as_secs_f64();
+            self.camera = f.at(t);
+            if f.finished(t) {
+                self.flight = None;
+                self.changed();
+            }
+            self.wants_redraw = true;
         }
 
         if std::mem::take(&mut self.want_gallery) && self.screen == Screen::Canvas {
@@ -1214,6 +1280,7 @@ impl CanvasApp {
         let mut actions = ui::Actions::default();
         let mut gallery_actions = Vec::new();
         let mut photo_actions = Vec::new();
+        let mut bookmark_actions = Vec::new();
         let mut finish_edit = false;
         let mut toast_visible = false;
         let mut rects = Vec::new();
@@ -1248,6 +1315,11 @@ impl CanvasApp {
                 self.safe_top,
             );
             if self.photo_panel.open {
+                r.push(egui::Rect::EVERYTHING);
+            }
+            let names: Vec<String> = self.doc.bookmarks.iter().map(|b| b.name.clone()).collect();
+            bookmark_actions = ui::bookmarks_window(ui.ctx(), &mut self.bookmark_panel, &names, self.safe_top);
+            if self.bookmark_panel.open {
                 r.push(egui::Rect::EVERYTHING);
             }
             if let Some((msg, t)) = &self.toast
@@ -1295,6 +1367,13 @@ impl CanvasApp {
         }
         for a in photo_actions {
             self.photo_action(a);
+        }
+        for a in bookmark_actions {
+            self.bookmark_action(a);
+        }
+        if actions.bookmarks {
+            self.bookmark_panel.open = !self.bookmark_panel.open;
+            self.photo_panel.open = false;
         }
         if actions.export {
             self.pending_export = true;
