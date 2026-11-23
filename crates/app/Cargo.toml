@@ -11,6 +11,7 @@ egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 log = "0.4.35"
+num-bigint = "0.5"
 png = "0.17"
 pollster = "1.0.3"
 wgpu = "30"

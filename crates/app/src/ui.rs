@@ -12,6 +12,8 @@ pub enum Tool {
     Eraser,
     /// One finger moves the view (nothing is drawn): for showing a drawing around.
     Hand,
+    /// Lasso selection: select strokes, then move / scale / delete / duplicate / recolour them.
+    Select,
 }
 
 pub struct ToolState {
@@ -182,7 +184,7 @@ fn colors(ui: &mut egui::Ui, s: &mut ToolState) {
 
 fn size_slider(ui: &mut egui::Ui, s: &mut ToolState, label: bool) {
     let (value, range, decimals, text) = match s.tool {
-        Tool::Pen | Tool::Hand => (&mut s.width, 0.5..=64.0, 1, "grubość"),
+        Tool::Pen | Tool::Hand | Tool::Select => (&mut s.width, 0.5..=64.0, 1, "grubość"),
         Tool::Eraser => (&mut s.eraser, 4.0..=160.0, 0, "rozmiar"),
     };
     let slider = egui::Slider::new(value, range).logarithmic(true).max_decimals(decimals);
@@ -195,6 +197,7 @@ fn history_buttons(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
 }
 
 fn hand_button(ui: &mut egui::Ui, s: &mut ToolState) {
+    ui.selectable_value(&mut s.tool, Tool::Select, "Zaznacz").on_hover_text("Obrysuj kreski palcem, potem przeciągnij je albo zmień rozmiar uchwytem w rogu");
     ui.selectable_value(&mut s.tool, Tool::Hand, "Przesuń")
         .on_hover_text("Jeden palec przesuwa płótno, nic nie rysuje. Dwa stuknięcia i przeciągnięcie w górę/dół – zoom.");
 }
@@ -816,6 +819,39 @@ pub fn layers_window(ctx: &egui::Context, st: &mut LayerPanel, layers: &[LayerIn
         st.confirm_delete = None;
     }
     out
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SelectionAction {
+    Delete,
+    Duplicate,
+    Recolor,
+    Done,
+}
+
+/// Actions for the current selection, at the bottom of the screen.
+pub fn selection_bar(ctx: &egui::Context, count: usize) -> (Option<SelectionAction>, Rect) {
+    let mut out = None;
+    let r = egui::Area::new(egui::Id::unique("selection-bar")).anchor(Align2::CENTER_BOTTOM, [0.0, -24.0]).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Zaznaczone: {count}"));
+                if ui.button("Usuń").clicked() {
+                    out = Some(SelectionAction::Delete);
+                }
+                if ui.button("Duplikuj").clicked() {
+                    out = Some(SelectionAction::Duplicate);
+                }
+                if ui.button("Kolor").on_hover_text("Nadaj zaznaczonym kreskom aktualny kolor").clicked() {
+                    out = Some(SelectionAction::Recolor);
+                }
+                if ui.button("Gotowe").clicked() {
+                    out = Some(SelectionAction::Done);
+                }
+            });
+        });
+    });
+    (out, r.response.rect)
 }
 
 /// A short message near the bottom of the screen.

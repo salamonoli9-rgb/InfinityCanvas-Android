@@ -1023,3 +1023,48 @@ fn stroke_tip_is_drawn_ahead_while_drawing_only() {
     assert!(!dark(&px, 308, 200), "the saved stroke has only real points");
     assert!(dark(&px, 290, 200));
 }
+
+#[test]
+fn lasso_select_move_scale_and_actions() {
+    use infinite_canvas::ui::Tool;
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 6.0;
+    draw_line(&mut app, 160.0, 100.0, 250.0); // to select
+    draw_line(&mut app, 250.0, 500.0, 650.0); // stays
+    assert_eq!(app.doc.len(), 2);
+    app.tools.tool = Tool::Select;
+    // Lasso around the first line.
+    draw_path(&mut app, &[[80.0, 130.0], [280.0, 130.0], [280.0, 190.0], [80.0, 190.0], [80.0, 130.0]], 10.0);
+    assert_eq!(app.selection().len(), 1);
+    assert_eq!(app.doc.len(), 2, "the lasso is not a stroke");
+    // Drag it down by 80 px from inside the box.
+    draw_path(&mut app, &[[170.0, 160.0], [170.0, 240.0]], 20.0);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 170, 240) && !dark(&px, 170, 160), "moved");
+    assert!(dark(&px, 600, 250), "the other line stays");
+    app.undo();
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 170, 160) && !dark(&px, 170, 240), "undo puts it back");
+    // Select again, scale ×2 with the handle (bottom-right corner, around the top-left one).
+    draw_path(&mut app, &[[80.0, 130.0], [280.0, 130.0], [280.0, 190.0], [80.0, 190.0], [80.0, 130.0]], 30.0);
+    assert_eq!(app.selection().len(), 1);
+    let b = infinite_canvas::selection::bbox(&app.doc, &app.camera, [W as f64, H as f64], app.selection(), None).unwrap();
+    let corner = [b[2], b[3]];
+    let target = [b[0] + 2.0 * (b[2] - b[0]), b[1] + 2.0 * (b[3] - b[1])];
+    draw_path(&mut app, &[corner, target], 40.0);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 340, (b[1] + 2.0 * (160.0 - b[1])) as u32), "scaled to twice the length");
+    // Duplicate, recolour, delete.
+    app.tools.color = egui::Color32::from_rgb(220, 30, 30);
+    let n = app.doc.len();
+    app.select_action(infinite_canvas::ui::SelectionAction::Duplicate);
+    assert_eq!(app.doc.len(), n + 1);
+    app.select_action(infinite_canvas::ui::SelectionAction::Recolor);
+    assert!(app.doc.get(app.selection()[0]).unwrap().color == [220, 30, 30, 255]);
+    app.select_action(infinite_canvas::ui::SelectionAction::Delete);
+    assert_eq!(app.doc.len(), n);
+}

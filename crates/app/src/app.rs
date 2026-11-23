@@ -136,6 +136,9 @@ pub struct CanvasApp {
     video_factory: Option<crate::video::VideoFactory>,
     /// Video export in progress.
     video: Option<VideoExport>,
+    /// Selected strokes (Select tool) and what the finger is doing with them.
+    selection: Vec<canvas_core::stroke::StrokeId>,
+    sel_drag: Option<SelDrag>,
     /// Bumped on every change of what is drawn (strokes, photos, layers).
     content_rev: u64,
     /// What the renderer's scene cache holds.
@@ -197,6 +200,31 @@ impl FrameStats {
         }
     }
 }
+
+enum SelDrag {
+    Lasso(Vec<[f64; 2]>),
+    Move { start: [f64; 2], cur: [f64; 2] },
+    Scale { center: [f64; 2], start: [f64; 2], cur: [f64; 2] },
+}
+
+impl SelDrag {
+    /// The move / scale in progress, if any.
+    fn xform(&self) -> Option<crate::selection::Xform> {
+        use crate::selection::Xform;
+        match *self {
+            SelDrag::Lasso(_) => None,
+            SelDrag::Move { start, cur } => Some(Xform::Move([cur[0] - start[0], cur[1] - start[1]])),
+            SelDrag::Scale { center, start, cur } => {
+                let d0 = (start[0] - center[0]).hypot(start[1] - center[1]).max(1.0);
+                let d1 = (cur[0] - center[0]).hypot(cur[1] - center[1]);
+                Some(Xform::Scale { center, k: (d1 / d0).max(0.02) })
+            }
+        }
+    }
+}
+
+/// Size of the selection's scale handle (logical points).
+const SELECTION_HANDLE: f64 = 28.0;
 
 struct VideoExport {
     cams: Vec<Camera>,
@@ -304,6 +332,8 @@ impl CanvasApp {
             active_layer: 0,
             urgent: Vec::new(),
             content_rev: 0,
+            selection: Vec::new(),
+            sel_drag: None,
             video_factory: None,
             video: None,
             cache: None,
@@ -787,6 +817,120 @@ impl CanvasApp {
         self.changed();
     }
 
+    /// One-finger gestures of the Select tool: lasso, or move / scale the selection.
+    fn apply_select(&mut self, g: &Gesture) -> bool {
+        use crate::selection::{Grab, bbox, grab, lasso};
+        let ppp = self.pixels_per_point as f64;
+        match *g {
+            Gesture::StrokeBegin { pos, .. } => {
+                let b = bbox(&self.doc, &self.camera, self.viewport, &self.selection, None);
+                self.sel_drag = Some(match b.and_then(|b| grab(b, pos, SELECTION_HANDLE * ppp)) {
+                    Some(Grab::Move) => SelDrag::Move { start: pos, cur: pos },
+                    Some(Grab::Scale { center }) => SelDrag::Scale { center, start: pos, cur: pos },
+                    None => {
+                        self.selection.clear();
+                        SelDrag::Lasso(vec![pos])
+                    }
+                });
+            }
+            Gesture::StrokeMove { pos, .. } => match self.sel_drag.as_mut() {
+                Some(SelDrag::Lasso(pts)) => {
+                    if pts.last().is_none_or(|l| (l[0] - pos[0]).hypot(l[1] - pos[1]) > 2.0) {
+                        pts.push(pos);
+                    }
+                }
+                Some(SelDrag::Move { cur, .. } | SelDrag::Scale { cur, .. }) => *cur = pos,
+                None => {}
+            },
+            Gesture::StrokeEnd => match self.sel_drag.take() {
+                Some(SelDrag::Lasso(pts)) => {
+                    self.selection = lasso(&self.doc, &self.camera, self.viewport, &pts);
+                    if self.selection.is_empty() && pts.len() > 3 {
+                        self.toast = Some(("Nic nie zaznaczono – obrysuj kreski".into(), Instant::now()));
+                    }
+                }
+                Some(d) => {
+                    if let Some(x) = d.xform()
+                        && x != crate::selection::Xform::Move([0.0, 0.0])
+                    {
+                        self.transform_selection(x, None);
+                    }
+                }
+                None => {}
+            },
+            Gesture::StrokeCancel => self.sel_drag = None,
+            _ => return false,
+        }
+        self.wants_redraw = true;
+        true
+    }
+
+    /// Replaces the selected strokes by transformed / recoloured copies (one undo step).
+    fn transform_selection(&mut self, x: crate::selection::Xform, color: Option<[u8; 4]>) {
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        for id in std::mem::take(&mut self.selection) {
+            let Some(s) = self.doc.get(id).cloned() else { continue };
+            let new_id = self.doc.alloc_id();
+            let mut t = crate::selection::transformed(&s, &self.camera, self.viewport, x, new_id);
+            if let Some(c) = color {
+                t.color = c;
+            }
+            removed.push(s);
+            added.push(t);
+        }
+        self.selection = added.iter().map(|s| s.id).collect();
+        self.urgent.extend(self.selection.iter().copied());
+        if !added.is_empty() {
+            self.history.apply(&mut self.doc, Action::Replace { removed, added });
+            self.changed();
+        }
+    }
+
+    fn selection_action(&mut self, a: ui::SelectionAction) {
+        match a {
+            ui::SelectionAction::Delete => {
+                let strokes: Vec<Stroke> = self.selection.iter().filter_map(|id| self.doc.get(*id).cloned()).collect();
+                self.selection.clear();
+                if !strokes.is_empty() {
+                    self.history.apply(&mut self.doc, Action::Remove(strokes));
+                    self.changed();
+                }
+            }
+            ui::SelectionAction::Duplicate => {
+                let d = 24.0 * self.pixels_per_point as f64;
+                let mut copies = Vec::new();
+                for id in self.selection.clone() {
+                    let Some(s) = self.doc.get(id).cloned() else { continue };
+                    let new_id = self.doc.alloc_id();
+                    copies.push(crate::selection::transformed(&s, &self.camera, self.viewport, crate::selection::Xform::Move([d, d]), new_id));
+                }
+                self.selection = copies.iter().map(|s| s.id).collect();
+                self.urgent.extend(self.selection.iter().copied());
+                if !copies.is_empty() {
+                    self.history.apply(&mut self.doc, Action::Add(copies));
+                    self.changed();
+                }
+            }
+            ui::SelectionAction::Recolor => {
+                let c = self.tools.color;
+                self.transform_selection(crate::selection::Xform::Move([0.0, 0.0]), Some([c.r(), c.g(), c.b(), c.a()]));
+            }
+            ui::SelectionAction::Done => self.selection.clear(),
+        }
+        self.wants_redraw = true;
+    }
+
+    /// Runs a selection action (as from the selection bar).
+    pub fn select_action(&mut self, a: ui::SelectionAction) {
+        self.selection_action(a);
+    }
+
+    /// Selected stroke ids (Select tool).
+    pub fn selection(&self) -> &[canvas_core::stroke::StrokeId] {
+        &self.selection
+    }
+
     /// How videos are encoded on this platform (set by the launcher).
     pub fn set_video_factory(&mut self, f: crate::video::VideoFactory) {
         self.video_factory = Some(f);
@@ -1244,6 +1388,9 @@ impl CanvasApp {
             self.apply_to_image(g);
             return;
         }
+        if self.tools.tool == Tool::Select && self.apply_select(&g) {
+            return;
+        }
         match g {
             Gesture::StrokeBegin { pos, pressure, time, erase } => {
                 let eraser = erase || self.tools.tool == Tool::Eraser;
@@ -1561,6 +1708,7 @@ impl CanvasApp {
         let mut bookmark_actions = Vec::new();
         let mut layer_actions = Vec::new();
         let mut finish_edit = false;
+        let mut sel_action = None;
         let mut toast_visible = false;
         let mut rects = Vec::new();
         let lib_busy = self.photo_lib.as_mut().is_some_and(|l| l.poll());
@@ -1619,6 +1767,28 @@ impl CanvasApp {
             }
             if self.video.is_some() {
                 r.push(egui::Rect::EVERYTHING);
+            }
+            if self.tools.tool != Tool::Select {
+                self.selection.clear();
+                self.sel_drag = None;
+            }
+            let ppp = self.pixels_per_point;
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("selection")));
+            let blue = egui::Color32::from_rgb(30, 120, 230);
+            if let Some(SelDrag::Lasso(pts)) = &self.sel_drag {
+                let line: Vec<egui::Pos2> = pts.iter().map(|p| egui::pos2(p[0] as f32 / ppp, p[1] as f32 / ppp)).collect();
+                painter.add(egui::Shape::line(line, egui::Stroke::new(1.5, blue)));
+            }
+            if !self.selection.is_empty() {
+                let x = self.sel_drag.as_ref().and_then(|d| d.xform());
+                if let Some(b) = crate::selection::bbox(&self.doc, &self.camera, self.viewport, &self.selection, x) {
+                    let rect = egui::Rect::from_min_max(egui::pos2(b[0] as f32 / ppp, b[1] as f32 / ppp), egui::pos2(b[2] as f32 / ppp, b[3] as f32 / ppp));
+                    painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.5, blue), egui::StrokeKind::Outside);
+                    painter.circle(rect.max, 9.0, egui::Color32::WHITE, egui::Stroke::new(2.0, blue));
+                }
+                let (act, bar) = ui::selection_bar(ui.ctx(), self.selection.len());
+                r.push(bar);
+                sel_action = act;
             }
             if self.image_edit.is_some() && ui::image_edit_bar(ui.ctx()).0 {
                 finish_edit = true;
@@ -1686,6 +1856,9 @@ impl CanvasApp {
         if finish_edit {
             self.finish_image_edit();
         }
+        if let Some(a) = sel_action {
+            self.selection_action(a);
+        }
         if let Some((_, bytes)) = self.photo_lib.as_mut().and_then(|l| l.loaded.take()) {
             match bytes {
                 Some(b) => self.offer_photo(b),
@@ -1715,6 +1888,7 @@ impl CanvasApp {
         }
         let moving = now - self.last_move < MOVE_SETTLE || self.inertia.active() || self.flight.is_some();
         let eraser_active = self.active.as_ref().is_some_and(|a| a.stroke.is_eraser());
+        let sel_xform = self.sel_drag.as_ref().and_then(|d| d.xform());
         let drawing_ink = self.active.is_some() && !eraser_active;
         let canvas = self.screen == Screen::Canvas;
 
@@ -1740,7 +1914,7 @@ impl CanvasApp {
         let rerender = match &self.cache {
             _ if !canvas => false,
             None => true,
-            Some(c) if c.rev != self.content_rev || eraser_active || self.image_edit.is_some() => true,
+            Some(c) if c.rev != self.content_rev || eraser_active || self.image_edit.is_some() || sel_xform.is_some() => true,
             Some(c) if moving => match cache_misfit(c, &self.camera) {
                 0 => false,
                 1 => c.made.elapsed() >= CACHE_REFRESH,
@@ -1755,8 +1929,19 @@ impl CanvasApp {
             let m = [(vp[0] * CACHE_MARGIN).round(), (vp[1] * CACHE_MARGIN).round()];
             let cvp = [vp[0] + 2.0 * m[0], vp[1] + 2.0 * m[1]];
             let tq = Instant::now();
-            let visible = self.doc.query(&self.camera, cvp, [0.0, 0.0, cvp[0], cvp[1]]);
+            let mut visible = self.doc.query(&self.camera, cvp, [0.0, 0.0, cvp[0], cvp[1]]);
             query_time = tq.elapsed().as_secs_f64();
+            // Selection being moved / scaled: preview through the render transform (the cache
+            // has the margin m around the screen, so screen points shift by m).
+            if let Some(x) = sel_xform {
+                let x = match x {
+                    crate::selection::Xform::Scale { center, k } => crate::selection::Xform::Scale { center: [center[0] + m[0], center[1] + m[1]], k },
+                    mv => mv,
+                };
+                for v in visible.iter_mut().filter(|v| self.selection.contains(&v.id)) {
+                    x.apply_visible(v);
+                }
+            }
             visible_count = visible.len();
             let images = self.image_draws(&self.camera, cvp);
             // The eraser is previewed inside the scene (it removes ink there).

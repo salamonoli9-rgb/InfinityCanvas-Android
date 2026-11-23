@@ -6,6 +6,7 @@ pub mod gestures;
 pub mod photos;
 pub mod projects;
 pub mod render;
+pub mod selection;
 pub mod shapes;
 pub mod ui;
 pub mod video;
