@@ -24,7 +24,7 @@ impl Default for ToolState {
             tool: Tool::Pen,
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
-            eraser: 12.0,
+            eraser: 24.0,
             palette: vec![
                 Color32::from_rgb(0x1d, 0x1d, 0x1f),
                 Color32::from_rgb(0x8e, 0x8e, 0x93),

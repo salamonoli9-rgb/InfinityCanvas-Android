@@ -7,13 +7,40 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 4] = b"ICNV";
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
+/// Version 2: strokes carry a draw order (`Stroke::order`).
 #[derive(Serialize, Deserialize)]
-struct FileV1 {
+struct FileV2 {
     camera: Camera,
     next_id: StrokeId,
     strokes: Vec<Stroke>,
+}
+
+/// Version 1: no draw order; the id was the order.
+#[derive(Deserialize)]
+struct FileV1 {
+    camera: Camera,
+    next_id: StrokeId,
+    strokes: Vec<StrokeV1>,
+}
+
+#[derive(Deserialize)]
+struct StrokeV1 {
+    id: StrokeId,
+    level: i32,
+    anchor: [num_bigint::BigInt; 2],
+    points: Vec<crate::stroke::StrokePoint>,
+    color: [u8; 4],
+    width: f32,
+}
+
+impl From<StrokeV1> for Stroke {
+    fn from(s: StrokeV1) -> Self {
+        let mut out = Stroke::new(s.id, s.level, s.anchor, s.color, s.width);
+        out.points = s.points;
+        out
+    }
 }
 
 #[derive(Debug)]
@@ -38,7 +65,7 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 pub fn encode(doc: &Document, camera: &Camera) -> Vec<u8> {
-    let file = FileV1 { camera: camera.clone(), next_id: doc.next_id(), strokes: doc.strokes().cloned().collect() };
+    let file = FileV2 { camera: camera.clone(), next_id: doc.next_id(), strokes: doc.strokes().cloned().collect() };
     let mut out = Vec::with_capacity(64 + doc.len() * 128);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
@@ -54,6 +81,10 @@ pub fn decode(bytes: &[u8]) -> Result<(Document, Camera), LoadError> {
     match version {
         1 => {
             let f: FileV1 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
+            Ok((Document::from_strokes(f.strokes.into_iter().map(Stroke::from).collect(), f.next_id), f.camera))
+        }
+        2 => {
+            let f: FileV2 = postcard::from_bytes(&bytes[6..]).map_err(LoadError::Corrupt)?;
             Ok((Document::from_strokes(f.strokes, f.next_id), f.camera))
         }
         v => Err(LoadError::UnsupportedVersion(v)),
@@ -112,6 +143,37 @@ mod tests {
     fn rejects_garbage() {
         assert!(matches!(decode(b"nope"), Err(LoadError::BadMagic)));
         assert!(matches!(decode(b"ICNV\x09\x00"), Err(LoadError::UnsupportedVersion(9))));
-        assert!(matches!(decode(b"ICNV\x01\x00\xff"), Err(LoadError::Corrupt(_))));
+        assert!(matches!(decode(b"ICNV\x02\x00\xff"), Err(LoadError::Corrupt(_))));
+    }
+
+    #[test]
+    fn reads_version_1() {
+        #[derive(Serialize)]
+        struct S1 {
+            id: StrokeId,
+            level: i32,
+            anchor: [BigInt; 2],
+            points: Vec<StrokePoint>,
+            color: [u8; 4],
+            width: f32,
+        }
+        #[derive(Serialize)]
+        struct F1 {
+            camera: Camera,
+            next_id: StrokeId,
+            strokes: Vec<S1>,
+        }
+        let pts = vec![StrokePoint { x: 1.0, y: 2.0, pressure: 1.0 }, StrokePoint { x: 3.0, y: 2.0, pressure: 1.0 }];
+        let f = F1 {
+            camera: Camera::default(),
+            next_id: 8,
+            strokes: vec![S1 { id: 7, level: -3, anchor: [BigInt::from(5), BigInt::from(-5)], points: pts.clone(), color: [9, 9, 9, 255], width: 2.0 }],
+        };
+        let mut bytes = b"ICNV\x01\x00".to_vec();
+        bytes.extend(postcard::to_allocvec(&f).unwrap());
+        let (d, _) = decode(&bytes).unwrap();
+        let s = d.get(7).unwrap();
+        assert_eq!((s.order, s.level, &s.points, s.width), (7, -3, &pts, 2.0));
+        assert_eq!(d.next_id(), 8);
     }
 }

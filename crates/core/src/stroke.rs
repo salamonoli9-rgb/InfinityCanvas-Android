@@ -27,6 +27,8 @@ pub struct Stroke {
     pub color: [u8; 4],
     /// Full width at pressure 1, in level units.
     pub width: f32,
+    /// Draw order (lower = further back). Pieces left by the eraser keep their parent's order.
+    pub order: u64,
     #[serde(skip)]
     pub cache: StrokeCache,
 }
@@ -46,7 +48,7 @@ pub fn pressure_factor(p: f32) -> f32 {
 
 impl Stroke {
     pub fn new(id: StrokeId, level: i32, anchor: [BigInt; 2], color: [u8; 4], width: f32) -> Self {
-        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, cache: StrokeCache::default() };
+        let mut s = Self { id, level, anchor, points: Vec::new(), color, width, order: id, cache: StrokeCache::default() };
         s.refresh_cache();
         s
     }
@@ -83,6 +85,77 @@ impl Stroke {
             bb[2] = bb[2].max(p.x + r);
             bb[3] = bb[3].max(p.y + r);
         }
+    }
+
+    /// Erases the part of the stroke touched by a circle of radius `r` at local point `c`.
+    ///
+    /// A point counts as erased when the circle overlaps the ink there (distance to the centre
+    /// line ≤ `r` + local brush radius), so the round caps of the remaining pieces end tangent
+    /// to the eraser. Crossings are located exactly on each segment, not just at samples.
+    /// Returns `None` if nothing was touched, otherwise the remaining pieces (possibly none).
+    pub fn erase_circle(&self, c: [f64; 2], r: f64) -> Option<Vec<Vec<StrokePoint>>> {
+        if !self.hit_circle(c, r) {
+            return None;
+        }
+        let pts = &self.points;
+        if pts.len() == 1 {
+            return Some(Vec::new());
+        }
+        let lerp = |a: &StrokePoint, b: &StrokePoint, t: f64| StrokePoint {
+            x: (a.x as f64 + (b.x - a.x) as f64 * t) as f32,
+            y: (a.y as f64 + (b.y - a.y) as f64 * t) as f32,
+            pressure: a.pressure + (b.pressure - a.pressure) * t as f32,
+        };
+        // Signed: < 0 inside the erased zone. Convex along a segment (distance to a point
+        // minus a linear radius), so each segment has at most two crossings.
+        let f = |p: &StrokePoint| ((c[0] - p.x as f64).powi(2) + (c[1] - p.y as f64).powi(2)).sqrt() - r - self.radius_at(p) as f64;
+        let bisect = |a: &StrokePoint, b: &StrokePoint, mut lo: f64, mut hi: f64| {
+            let inside_lo = f(&lerp(a, b, lo)) < 0.0;
+            for _ in 0..30 {
+                let mid = 0.5 * (lo + hi);
+                if (f(&lerp(a, b, mid)) < 0.0) == inside_lo {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+        let mut pieces: Vec<Vec<StrokePoint>> = Vec::new();
+        let mut cur: Vec<StrokePoint> = Vec::new();
+        if f(&pts[0]) >= 0.0 {
+            cur.push(pts[0]);
+        }
+        for w in pts.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            let (dx, dy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+            let len2 = dx * dx + dy * dy;
+            let tc = if len2 > 0.0 { (((c[0] - a.x as f64) * dx + (c[1] - a.y as f64) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let (fa, fc, fb) = (f(a) < 0.0, f(&lerp(a, b, tc)) < 0.0, f(b) < 0.0);
+            // Crossings in order along the segment: (t, entering_erased_zone).
+            let mut cross: Vec<(f64, bool)> = Vec::new();
+            if fa != fc {
+                cross.push((bisect(a, b, 0.0, tc), !fa));
+            }
+            if fc != fb {
+                cross.push((bisect(a, b, tc, 1.0), !fc));
+            }
+            for (t, entering) in cross {
+                let p = lerp(a, b, t);
+                if entering {
+                    cur.push(p);
+                    pieces.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(p);
+                }
+            }
+            if !fb {
+                cur.push(*b);
+            }
+        }
+        pieces.push(cur);
+        pieces.retain(|p| p.len() >= 2);
+        Some(pieces)
     }
 
     /// Does a circle of radius `r` at local point `c` touch the inked area?
@@ -126,5 +199,40 @@ mod tests {
         let mut t = s.clone();
         t.refresh_cache();
         assert_eq!(t.cache, s.cache);
+    }
+
+    fn line(n: usize) -> Stroke {
+        let mut s = Stroke::new(1, 0, [BigInt::from(0), BigInt::from(0)], [0, 0, 0, 255], 4.0);
+        for i in 0..=n {
+            s.push(StrokePoint { x: i as f32 * 100.0 / n as f32, y: 0.0, pressure: 1.0 });
+        }
+        s
+    }
+
+    #[test]
+    fn erase_middle_splits_in_two() {
+        // Sparse points: the cut must be located inside the segments, not at samples.
+        let s = line(2);
+        let pieces = s.erase_circle([50.0, 1.0], 8.0).unwrap();
+        assert_eq!(pieces.len(), 2);
+        // Zone half-width along the line: sqrt((8+2)^2 - 1^2) ≈ 9.95.
+        let cut = (10.0f32 * 10.0 - 1.0).sqrt();
+        let end0 = pieces[0].last().unwrap().x;
+        let start1 = pieces[1][0].x;
+        assert!((end0 - (50.0 - cut)).abs() < 1e-3, "{end0}");
+        assert!((start1 - (50.0 + cut)).abs() < 1e-3, "{start1}");
+        assert_eq!(pieces[0][0].x, 0.0);
+        assert_eq!(pieces[1].last().unwrap().x, 100.0);
+    }
+
+    #[test]
+    fn erase_end_trims_and_miss_is_none() {
+        let s = line(10);
+        assert!(s.erase_circle([50.0, 30.0], 5.0).is_none());
+        let pieces = s.erase_circle([100.0, 0.0], 10.0).unwrap();
+        assert_eq!(pieces.len(), 1);
+        assert!((pieces[0].last().unwrap().x - 88.0).abs() < 1e-3);
+        let all = s.erase_circle([50.0, 0.0], 80.0).unwrap();
+        assert!(all.is_empty());
     }
 }

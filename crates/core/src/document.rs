@@ -101,6 +101,8 @@ impl LevelIndex {
 #[derive(Clone, Debug)]
 pub struct VisibleStroke {
     pub id: StrokeId,
+    /// Draw order key (see [`Stroke::order`]).
+    pub order: u64,
     pub level: i32,
     /// Screen position (px) of the stroke anchor, i.e. of local point (0, 0).
     pub offset: [f64; 2],
@@ -240,7 +242,7 @@ impl Document {
                 }
             }
         }
-        out.sort_unstable_by_key(|v| v.id);
+        out.sort_unstable_by_key(|v| (v.order, v.id));
         out
     }
 
@@ -255,7 +257,7 @@ impl Document {
         if (x1 - x0).max(y1 - y0) < MIN_PIXELS {
             return None;
         }
-        Some(VisibleStroke { id: s.id, level: s.level, offset: o, scale: f.scale })
+        Some(VisibleStroke { id: s.id, order: s.order, level: s.level, offset: o, scale: f.scale })
     }
 
     /// Ids of strokes touched by a circle of `radius` px around screen point `p`.

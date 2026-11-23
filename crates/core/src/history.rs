@@ -7,6 +7,8 @@ use crate::stroke::Stroke;
 pub enum Action {
     Add(Vec<Stroke>),
     Remove(Vec<Stroke>),
+    /// Strokes replaced by others (e.g. cut by the eraser).
+    Replace { removed: Vec<Stroke>, added: Vec<Stroke> },
 }
 
 impl Action {
@@ -16,6 +18,12 @@ impl Action {
             Action::Remove(v) => v.iter().for_each(|s| {
                 doc.remove(s.id);
             }),
+            Action::Replace { removed, added } => {
+                removed.iter().for_each(|s| {
+                    doc.remove(s.id);
+                });
+                added.iter().for_each(|s| doc.insert(s.clone()));
+            }
         }
     }
 
@@ -23,6 +31,7 @@ impl Action {
         match self {
             Action::Add(v) => Action::Remove(v.clone()),
             Action::Remove(v) => Action::Add(v.clone()),
+            Action::Replace { removed, added } => Action::Replace { removed: added.clone(), added: removed.clone() },
         }
     }
 }
@@ -104,5 +113,18 @@ mod tests {
         assert_eq!(d.len(), 2);
         h.apply(&mut d, Action::Add(vec![s(3)]));
         assert!(!h.can_redo());
+    }
+
+    #[test]
+    fn replace_roundtrip() {
+        let mut d = Document::new();
+        let mut h = History::default();
+        h.apply(&mut d, Action::Add(vec![s(1)]));
+        h.apply(&mut d, Action::Replace { removed: vec![s(1)], added: vec![s(2), s(3)] });
+        assert!(d.get(1).is_none() && d.get(2).is_some() && d.get(3).is_some());
+        assert!(h.undo(&mut d));
+        assert!(d.get(1).is_some() && d.get(2).is_none() && d.get(3).is_none());
+        assert!(h.redo(&mut d));
+        assert_eq!(d.len(), 2);
     }
 }

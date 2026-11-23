@@ -179,17 +179,40 @@ fn eraser_and_undo() {
     let mut app = new_app();
     draw_line(&mut app, 150.0, 100.0, 300.0);
     app.tools.tool = infinite_canvas::ui::Tool::Eraser;
+    app.tools.eraser = 24.0;
     draw_line(&mut app, 100.0, 200.0, 200.5); // touches nothing
     assert_eq!(app.doc.len(), 1);
+
+    // A tap cuts a gap; both ends stay.
     mouse(&mut app, Phase::Down, [200.0, 150.0], 2.0);
     mouse(&mut app, Phase::Up, [200.0, 150.0], 2.1);
-    assert_eq!(app.doc.len(), 0);
-    assert!(!dark(&gpu.frame(&mut app), 200, 150));
+    assert_eq!(app.doc.len(), 2);
+    let px = gpu.frame(&mut app);
+    assert!(!dark(&px, 200, 150));
+    // Gap = eraser circle: the round caps end tangent to it (radius 12).
+    assert!(!dark(&px, 209, 150) && !dark(&px, 191, 150));
+    assert!(dark(&px, 216, 150));
+    assert!(dark(&px, 225, 150) && dark(&px, 175, 150) && dark(&px, 120, 150) && dark(&px, 280, 150));
+
+    // A vertical swipe across the right piece: one gesture, one undo step.
+    mouse(&mut app, Phase::Down, [260.0, 100.0], 3.0);
+    for i in 1..=20 {
+        mouse(&mut app, Phase::Move, [260.0, 100.0 + i as f64 * 5.0], 3.0 + i as f64 / 120.0);
+    }
+    mouse(&mut app, Phase::Up, [260.0, 200.0], 3.5);
+    assert_eq!(app.doc.len(), 3);
+    let px = gpu.frame(&mut app);
+    assert!(!dark(&px, 260, 150) && dark(&px, 290, 150) && dark(&px, 230, 150));
+
+    app.undo();
+    assert_eq!(app.doc.len(), 2);
+    assert!(dark(&gpu.frame(&mut app), 260, 150));
     app.undo();
     assert_eq!(app.doc.len(), 1);
     assert!(dark(&gpu.frame(&mut app), 200, 150));
     app.redo();
-    assert_eq!(app.doc.len(), 0);
+    app.redo();
+    assert_eq!(app.doc.len(), 3);
 }
 
 /// `cargo test --release -p infinite_canvas --test render_offscreen -- --ignored --nocapture`

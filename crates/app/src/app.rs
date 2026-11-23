@@ -8,8 +8,8 @@ use canvas_core::document::Document;
 use canvas_core::history::{Action, History};
 use canvas_core::io;
 use canvas_core::smoothing::PointerSmoother;
-use canvas_core::stroke::{Stroke, StrokePoint};
-use std::collections::HashSet;
+use canvas_core::stroke::{Stroke, StrokeId, StrokePoint};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -26,8 +26,12 @@ struct ActiveStroke {
     smoother: PointerSmoother,
 }
 
+/// One eraser gesture: everything it changed becomes a single undo step.
 struct Erasing {
-    removed: Vec<Stroke>,
+    /// Strokes that existed before the gesture and were cut or removed by it.
+    removed: BTreeMap<StrokeId, Stroke>,
+    /// Pieces created during the gesture that are still in the document.
+    added: BTreeSet<StrokeId>,
     last: [f64; 2],
 }
 
@@ -230,7 +234,7 @@ impl CanvasApp {
         match g {
             Gesture::StrokeBegin { pos, pressure, time, erase } => {
                 if erase || self.tools.tool == Tool::Eraser {
-                    self.erasing = Some(Erasing { removed: Vec::new(), last: pos });
+                    self.erasing = Some(Erasing { removed: BTreeMap::new(), added: BTreeSet::new(), last: pos });
                     self.erase_at(pos);
                 } else {
                     self.begin_stroke(pos, pressure, time, kind);
@@ -245,8 +249,9 @@ impl CanvasApp {
             }
             Gesture::StrokeEnd => {
                 if let Some(er) = self.erasing.take() {
-                    if !er.removed.is_empty() {
-                        self.history.record(Action::Remove(er.removed));
+                    if !er.removed.is_empty() || !er.added.is_empty() {
+                        let added = er.added.iter().filter_map(|id| self.doc.get(*id).cloned()).collect();
+                        self.history.record(Action::Replace { removed: er.removed.into_values().collect(), added });
                         self.changed();
                     }
                 } else if let Some(a) = self.active.take() {
@@ -259,7 +264,10 @@ impl CanvasApp {
             Gesture::StrokeCancel => {
                 self.active = None;
                 if let Some(er) = self.erasing.take() {
-                    for s in er.removed {
+                    for id in er.added {
+                        self.doc.remove(id);
+                    }
+                    for s in er.removed.into_values() {
                         self.doc.insert(s);
                     }
                 }
@@ -310,29 +318,41 @@ impl CanvasApp {
         a.stroke.push(pt);
     }
 
+    /// Cuts away the ink under the eraser circle at screen point `pos`.
     fn erase_at(&mut self, pos: [f64; 2]) {
-        let r = self.tools.eraser as f64 * self.pixels_per_point as f64;
-        let hits = self.doc.hit_test(&self.camera, self.viewport, pos, r);
-        if let Some(er) = self.erasing.as_mut() {
-            for id in hits {
-                if let Some(s) = self.doc.remove(id) {
-                    er.removed.push(s);
-                }
+        let r = self.tools.eraser as f64 * self.pixels_per_point as f64 * 0.5;
+        let Some(mut er) = self.erasing.take() else { return };
+        for id in self.doc.hit_test(&self.camera, self.viewport, pos, r) {
+            let Some(s) = self.doc.get(id) else { continue };
+            let f = self.camera.level_frame(s.level, self.viewport);
+            let c = f.screen_to_local(pos, &s.anchor, s.cache.anchor_fast);
+            let Some(pieces) = s.erase_circle(c, r / f.scale) else { continue };
+            let s = self.doc.remove(id).expect("stroke exists");
+            if !er.added.remove(&id) {
+                er.removed.insert(id, s.clone());
+            }
+            for points in pieces {
+                let mut piece = Stroke::new(self.doc.alloc_id(), s.level, s.anchor.clone(), s.color, s.width);
+                piece.order = s.order;
+                piece.points = points;
+                piece.refresh_cache();
+                er.added.insert(piece.id);
+                self.doc.insert(piece);
             }
         }
+        er.last = pos;
+        self.erasing = Some(er);
     }
 
     fn erase_along(&mut self, pos: [f64; 2]) {
         let Some(last) = self.erasing.as_ref().map(|e| e.last) else { return };
-        let r = (self.tools.eraser as f64 * self.pixels_per_point as f64).max(1.0);
+        let r = (self.tools.eraser as f64 * self.pixels_per_point as f64 * 0.5).max(1.0);
         let d = ((pos[0] - last[0]).powi(2) + (pos[1] - last[1]).powi(2)).sqrt();
-        let steps = (d / (r * 0.5)).ceil().clamp(1.0, 200.0) as usize;
+        // Steps of r/4 keep the swept area smooth (no scalloped edges between circles).
+        let steps = (d / (r * 0.25)).ceil().clamp(1.0, 400.0) as usize;
         for i in 1..=steps {
             let t = i as f64 / steps as f64;
             self.erase_at([last[0] + (pos[0] - last[0]) * t, last[1] + (pos[1] - last[1]) * t]);
-        }
-        if let Some(e) = self.erasing.as_mut() {
-            e.last = pos;
         }
     }
 
@@ -448,6 +468,14 @@ impl CanvasApp {
             let (a, r) = ui::toolbar(ui.ctx(), &mut self.tools, &info, self.safe_top);
             actions = a;
             rects = r;
+            if let Some(er) = &self.erasing {
+                let ppp = self.pixels_per_point;
+                let c = egui::pos2(er.last[0] as f32 / ppp, er.last[1] as f32 / ppp);
+                let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("eraser")));
+                let r = self.tools.eraser * 0.5;
+                p.circle_stroke(c, r, egui::Stroke::new(1.5, egui::Color32::from_gray(255)));
+                p.circle_stroke(c, r, egui::Stroke::new(0.8, egui::Color32::from_gray(60)));
+            }
         });
         self.ui_rects = rects;
         if actions.undo {
