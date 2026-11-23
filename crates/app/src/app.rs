@@ -109,6 +109,8 @@ pub struct CanvasApp {
     pub image_edit: Option<ImageEdit>,
     photo_panel: ui::PhotoPanel,
     photo_lib: Option<PhotoLibrary>,
+    /// Bytes of a photo waiting for "trace over it" / "turn into a drawing".
+    pending_photo: Option<Vec<u8>>,
     save_thread: Option<std::thread::JoinHandle<()>>,
     /// Set when a different document was loaded: cached meshes are keyed by stroke id.
     clear_render_cache: bool,
@@ -218,6 +220,7 @@ impl CanvasApp {
             image_edit: None,
             photo_panel: ui::PhotoPanel::default(),
             photo_lib: None,
+            pending_photo: None,
             save_thread: None,
             clear_render_cache: false,
         }
@@ -495,6 +498,66 @@ impl CanvasApp {
         Ok(id)
     }
 
+    /// A photo was picked or dropped: ask how to add it.
+    pub fn offer_photo(&mut self, bytes: Vec<u8>) {
+        self.pending_photo = Some(bytes);
+        self.photo_panel.open = true;
+        self.photo_panel.picking = false;
+        self.photo_panel.choosing = true;
+        self.photo_panel.message = None;
+        self.wants_redraw = true;
+    }
+
+    /// Turns a photo into strokes (its outlines), centred on the screen like a placed photo,
+    /// with the current brush, colour and width. One undo step (plus one for the photo, if kept).
+    pub fn photo_to_drawing(&mut self, bytes: &[u8], detail: f32, keep_photo: bool) -> Result<usize, String> {
+        let img = crate::photos::decode(bytes).ok_or("Nie udało się odczytać zdjęcia")?;
+        let side = (500.0 + 700.0 * detail.clamp(0.0, 1.0)) as u32;
+        let gray = img.thumbnail(side, side).to_luma8();
+        let (w, h) = (gray.width() as usize, gray.height() as usize);
+        let lines = canvas_core::trace::trace(gray.as_raw(), w, h, canvas_core::trace::TraceOptions { detail });
+        if lines.is_empty() {
+            return Err("Nie znaleziono konturów – spróbuj więcej szczegółów".into());
+        }
+        // Same placement as a photo: fitted into 80% of the screen, centred, upright.
+        let vp = self.viewport;
+        let k = (vp[0] * 0.8 / w as f64).min(vp[1] * 0.8 / h as f64);
+        let origin = [vp[0] * 0.5 - w as f64 * k * 0.5, vp[1] * 0.5 - h as f64 * k * 0.5];
+        let level = self.camera.level();
+        let c = self.camera.screen_to_world([vp[0] * 0.5, vp[1] * 0.5], vp).mul_pow2(level);
+        let anchor = [c.x.floor_at(0), c.y.floor_at(0)];
+        let frame = self.camera.level_frame(level, vp);
+        let brush = match self.tools.brush {
+            Brush::Fill | Brush::Dotted => Brush::Pen,
+            b => b,
+        };
+        let col = self.tools.color;
+        let width = (self.tools.width as f64 * self.pixels_per_point as f64 / frame.scale) as f32;
+        let mut strokes = Vec::with_capacity(lines.len());
+        for line in &lines {
+            let mut s = Stroke::new(self.doc.alloc_id(), level, anchor.clone(), [col.r(), col.g(), col.b(), col.a()], width);
+            s.brush = brush;
+            for p in line {
+                let sp = [origin[0] + p[0] as f64 * k, origin[1] + p[1] as f64 * k];
+                let l = frame.screen_to_local(sp, &anchor, None);
+                s.points.push(StrokePoint { x: l[0] as f32, y: l[1] as f32, pressure: 1.0 });
+            }
+            s.refresh_cache();
+            strokes.push(s);
+        }
+        if keep_photo {
+            let id = self.add_photo(bytes)?;
+            if let Some(img) = self.doc.image_mut(id) {
+                img.opacity = 0.25;
+            }
+            self.image_edit = None;
+        }
+        let n = strokes.len();
+        self.history.apply(&mut self.doc, Action::Add(strokes));
+        self.changed();
+        Ok(n)
+    }
+
     /// Decodes photos that aren't decoded yet (after loading a project, undo of a delete…).
     fn decode_images(&mut self) {
         let missing: Vec<(ImageId, Arc<Vec<u8>>)> =
@@ -632,6 +695,36 @@ impl CanvasApp {
             Edit(id) => {
                 self.image_edit = Some(ImageEdit { id, before: None, last: None });
                 self.photo_panel.open = false;
+            }
+            UseAsReference => {
+                if let Some(bytes) = self.pending_photo.take() {
+                    self.photo_panel.choosing = false;
+                    match self.add_photo(&bytes) {
+                        Ok(_) => self.photo_panel.open = false,
+                        Err(e) => self.photo_panel.message = Some(e),
+                    }
+                }
+            }
+            Convert => {
+                if let Some(bytes) = self.pending_photo.take() {
+                    self.photo_panel.choosing = false;
+                    let (detail, keep) = (self.photo_panel.detail, self.photo_panel.keep_photo);
+                    match self.photo_to_drawing(&bytes, detail, keep) {
+                        Ok(n) => {
+                            log::info!("photo turned into {n} strokes");
+                            self.photo_panel.open = false;
+                        }
+                        Err(e) => {
+                            self.photo_panel.message = Some(e);
+                            self.pending_photo = Some(bytes);
+                            self.photo_panel.choosing = true;
+                        }
+                    }
+                }
+            }
+            CancelChoice => {
+                self.pending_photo = None;
+                self.photo_panel.choosing = false;
             }
         }
     }
@@ -986,12 +1079,8 @@ impl CanvasApp {
             self.finish_image_edit();
         }
         if let Some((_, bytes)) = self.photo_lib.as_mut().and_then(|l| l.loaded.take()) {
-            match bytes.as_deref().map(|b| self.add_photo(b)) {
-                Some(Ok(_)) => {
-                    self.photo_panel.open = false;
-                    self.photo_panel.picking = false;
-                }
-                Some(Err(e)) => self.photo_panel.message = Some(e),
+            match bytes {
+                Some(b) => self.offer_photo(b),
                 None => self.photo_panel.message = Some("Nie udało się wczytać zdjęcia".into()),
             }
         }

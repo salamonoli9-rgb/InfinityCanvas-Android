@@ -95,6 +95,21 @@ Wszystkie pędzle są wektorowe (ziarno ołówka liczone w shaderze we współrz
 nie tracą ostrości przy zoomie. Kreska półprzezroczysta nie ciemnieje tam, gdzie nachodzi sama
 na siebie (bufor stencil).
 
+### Zdjęcia
+
+Przycisk **Zdjęcia** → **Dodaj zdjęcie** pokazuje siatkę zdjęć z galerii telefonu (za pierwszym
+razem Android pyta o dostęp do zdjęć; na komputerze: obrazy z `~/Obrazy`, `~/Pictures`,
+`~/Pobrane` albo przeciągnięty na okno plik). Po wybraniu:
+
+- **Do odrysowania** – zdjęcie leży pod rysunkiem (gumka go nie ściera). Od razu można je
+  ustawić: jeden palec przesuwa, dwa skalują i obracają, „Gotowe” lub „Wstecz” kończy. W oknie
+  Zdjęcia: suwak krycia, „Przesuń / skaluj”, „Ukryj”, „Usuń”.
+- **Zamień na rysunek** – kontury zdjęcia (wykrywanie krawędzi Canny'ego) stają się zwykłymi
+  kreskami wektorowymi aktualnym pędzlem, kolorem i grubością; suwak „szczegóły” decyduje, ile
+  drobnych linii zostaje. Opcjonalnie blade zdjęcie zostaje pod spodem. Jedno „Cofnij” usuwa całość.
+
+Zdjęcie jest zapisywane w projekcie (JPEG, maks. 2048 px).
+
 ### Gesty
 
 | Akcja | Gest |
@@ -122,7 +137,7 @@ jest renderowana z wektorów przy wyjściu z projektu i co ~20 s podczas rysowan
 ## Zapis
 
 Rysunek zapisuje się automatycznie ~1,5 s po każdej zmianie oraz przy wyjściu/wstrzymaniu
-aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 5; starsze wersje nadal się
+aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 6; starsze wersje nadal się
 wczytują), dane w `postcard`. Zapis jest
 atomowy (plik tymczasowy + rename). Uszkodzony plik nie jest nadpisywany – zostaje przemianowany
 na `*.broken`.

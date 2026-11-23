@@ -279,13 +279,32 @@ pub struct PhotoInfo {
     pub visible: bool,
 }
 
-#[derive(Default)]
 pub struct PhotoPanel {
     pub open: bool,
     /// Showing the grid of photos to pick from.
     pub picking: bool,
     thumbs: HashMap<String, Option<egui::TextureHandle>>,
     pub message: Option<String>,
+    /// A photo was loaded and the user chooses how to add it.
+    pub choosing: bool,
+    /// Detail of the photo → drawing conversion, 0..1.
+    pub detail: f32,
+    /// Keep the photo faintly under the converted drawing.
+    pub keep_photo: bool,
+}
+
+impl Default for PhotoPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            picking: false,
+            thumbs: HashMap::new(),
+            message: None,
+            choosing: false,
+            detail: 0.5,
+            keep_photo: true,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -297,6 +316,11 @@ pub enum PhotoAction {
     ToggleVisible(u64),
     Delete(u64),
     Edit(u64),
+    /// Add the loaded photo to trace over.
+    UseAsReference,
+    /// Turn the loaded photo into strokes.
+    Convert,
+    CancelChoice,
 }
 
 /// The photos window: photos in this drawing (opacity, move, hide, delete) and the picker.
@@ -315,7 +339,14 @@ pub fn photos_window(
     let width = (screen.width() - 16.0).min(520.0);
     let max_h = (screen.height() - safe_top - 24.0).max(240.0);
     let mut open = true;
-    egui::Window::new(if st.picking { "Wybierz zdjęcie" } else { "Zdjęcia" })
+    let title = if st.choosing {
+        "Dodaj zdjęcie"
+    } else if st.picking {
+        "Wybierz zdjęcie"
+    } else {
+        "Zdjęcia"
+    };
+    egui::Window::new(title)
         .id(egui::Id::unique("photos"))
         .open(&mut open)
         .collapsible(false)
@@ -326,6 +357,26 @@ pub fn photos_window(
             ui.set_width(width - 16.0);
             if let Some(m) = &st.message {
                 ui.label(egui::RichText::new(m).italics());
+            }
+            if st.choosing {
+                ui.label("Jak dodać to zdjęcie?");
+                ui.add_space(4.0);
+                if ui.button("Do odrysowania – zdjęcie pod rysunkiem").clicked() {
+                    out.push(PhotoAction::UseAsReference);
+                }
+                ui.separator();
+                ui.label("Zamień na rysunek – kontury zdjęcia jako kreski (aktualnym pędzlem i kolorem):");
+                ui.add(egui::Slider::new(&mut st.detail, 0.0..=1.0).show_value(false).text("szczegóły"));
+                ui.checkbox(&mut st.keep_photo, "zostaw blade zdjęcie pod spodem");
+                ui.horizontal(|ui| {
+                    if ui.button("Zamień na rysunek").clicked() {
+                        out.push(PhotoAction::Convert);
+                    }
+                    if ui.button("Anuluj").clicked() {
+                        out.push(PhotoAction::CancelChoice);
+                    }
+                });
+                return;
             }
             if st.picking {
                 picker(ui, st, lib, max_h - 120.0, &mut out);
@@ -362,6 +413,9 @@ pub fn photos_window(
     if !open {
         st.open = false;
         st.picking = false;
+        if st.choosing {
+            out.push(PhotoAction::CancelChoice);
+        }
     }
     out
 }

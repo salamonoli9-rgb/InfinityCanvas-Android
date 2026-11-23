@@ -131,9 +131,9 @@ impl Desktop {
                     }
                 }
             }
-            WindowEvent::DroppedFile(path) => match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| self.app.add_photo(&b)) {
-                Ok(_) => log::info!("photo added: {}", path.display()),
-                Err(e) => log::warn!("cannot add {}: {e}", path.display()),
+            WindowEvent::DroppedFile(path) => match std::fs::read(&path) {
+                Ok(b) => self.app.offer_photo(b),
+                Err(e) => log::warn!("cannot read {}: {e}", path.display()),
             },
             WindowEvent::PinchGesture { delta, .. } => self.app.wheel_zoom(self.cursor, (1.0 + delta).log2()),
             WindowEvent::RotationGesture { delta, .. } => self.app.wheel_rotate(self.cursor, -(delta as f64).to_radians()),

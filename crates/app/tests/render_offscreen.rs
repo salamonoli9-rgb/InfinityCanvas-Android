@@ -495,3 +495,36 @@ fn reference_photo_under_strokes() {
     app.undo(); // photo
     assert_eq!(app.doc.images().count(), 0);
 }
+
+#[test]
+fn photo_turned_into_a_drawing() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 3.0;
+    // Dark disc (centre (200, 100), radius 80) on white, 400×200.
+    let img = image::RgbaImage::from_fn(400, 200, |x, y| {
+        let r = ((x as f32 - 200.0).powi(2) + (y as f32 - 100.0).powi(2)).sqrt();
+        if r < 80.0 { image::Rgba([20, 20, 20, 255]) } else { image::Rgba([240, 240, 240, 255]) }
+    });
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let n = app.photo_to_drawing(&png, 0.5, false).unwrap();
+    assert!(n >= 1 && app.doc.images().count() == 0);
+    let px = gpu.frame(&mut app);
+    // Placed like a photo: ×1.2, centred at (384, 150) → the outline has radius 96 on screen.
+    let near = |x: f64, y: f64| (-3..=3).any(|d| dark(&px, (x + d as f64) as u32, y as u32) || dark(&px, x as u32, (y + d as f64) as u32));
+    for a in [0.0f64, 1.0, 2.0, 3.0, 4.0, 5.0] {
+        let (x, y) = (384.0 + 96.0 * a.cos(), 150.0 + 96.0 * a.sin());
+        if y > 120.0 {
+            // (below the toolbar)
+            assert!(near(x, y), "outline at angle {a}: ({x:.0}, {y:.0})");
+        }
+    }
+    assert!(!dark(&px, 384, 150) && !dark(&px, 384, 200), "inside stays empty: it's a line drawing");
+    // One undo removes the whole drawing.
+    app.undo();
+    assert_eq!(app.doc.len(), 0);
+}

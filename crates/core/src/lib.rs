@@ -10,3 +10,4 @@ pub mod io;
 pub mod mesh;
 pub mod smoothing;
 pub mod stroke;
+pub mod trace;
