@@ -1001,3 +1001,25 @@ fn video_of_a_flight_through_bookmarks() {
     assert!(frames > 2 * 24 + 30, "{frames} frames: holds + flight");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn stroke_tip_is_drawn_ahead_while_drawing_only() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    app.tools.width = 4.0;
+    // 1000 px/s to the right.
+    mouse(&mut app, Phase::Down, [100.0, 200.0], 0.0);
+    for i in 1..=40 {
+        mouse(&mut app, Phase::Move, [100.0 + i as f64 * 5.0, 200.0], i as f64 * 0.005);
+    }
+    let px = gpu.frame_once(&mut app);
+    assert!(dark(&px, 308, 200), "tip drawn ahead of the input (at 300) while drawing");
+    mouse(&mut app, Phase::Up, [300.0, 200.0], 0.205);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let px = gpu.frame(&mut app);
+    assert!(!dark(&px, 308, 200), "the saved stroke has only real points");
+    assert!(dark(&px, 290, 200));
+}

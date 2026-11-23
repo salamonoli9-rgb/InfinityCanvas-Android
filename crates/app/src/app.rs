@@ -50,7 +50,16 @@ struct ActiveStroke {
     last_sample: Option<([f64; 2], f64)>,
     /// Shape guide being dragged, with its start point (screen px).
     shape: Option<(crate::shapes::Shape, [f64; 2])>,
+    /// Raw pointer position / time and smoothed velocity (screen px/s), for drawing the tip a
+    /// little ahead of the input (hides display and smoothing latency).
+    raw: Option<([f64; 2], f64)>,
+    raw_vel: [f64; 2],
 }
+
+/// How far ahead (s) the tip of the stroke being drawn is extrapolated on screen.
+const PREDICT_AHEAD: f64 = 0.014;
+/// …but never more than this (px per logical point of screen density).
+const PREDICT_MAX: f64 = 24.0;
 
 /// While drawing, every this many points are tessellated once and kept, so each frame only
 /// re-tessellates the short tail instead of the whole (possibly very long) stroke.
@@ -1340,6 +1349,8 @@ impl CanvasApp {
             speed: 0.0,
             last_sample: None,
             shape: if eraser { None } else { self.tools.shape.map(|sh| (sh, pos)) },
+            raw: None,
+            raw_vel: [0.0; 2],
         });
         self.extend_stroke(pos, pressure, time, kind);
     }
@@ -1359,6 +1370,15 @@ impl CanvasApp {
             a.stroke.refresh_cache();
             return;
         }
+        if let Some((lp, lt)) = a.raw {
+            let dt = time - lt;
+            if dt > 1e-4 {
+                let v = [(pos[0] - lp[0]) / dt, (pos[1] - lp[1]) / dt];
+                let k = (dt / (dt + 0.03)).min(1.0);
+                a.raw_vel = [a.raw_vel[0] + (v[0] - a.raw_vel[0]) * k, a.raw_vel[1] + (v[1] - a.raw_vel[1]) * k];
+            }
+        }
+        a.raw = Some((pos, time));
         // The eraser always has its full size.
         let pressure = if a.stroke.is_eraser() { 1.0 } else { Self::pressure(kind, pressure) };
         let (x, y, mut p) = a.smoother.push(pos[0], pos[1], pressure as f64, time);
@@ -1747,8 +1767,9 @@ impl CanvasApp {
                     layer: self.doc.layer_pos(a.stroke.layer) as u16,
                     offset: f.anchor_to_screen(&a.stroke.anchor, a.stroke.cache.anchor_fast),
                     scale: f.scale,
-                    frozen: &a.frozen,
+                        frozen: &a.frozen,
                     tail_from: a.frozen_upto,
+                    predicted: None,
                 }
             });
             renderer.render_scene_cache(
@@ -1789,9 +1810,24 @@ impl CanvasApp {
         } else {
             None
         };
-        // The ink stroke being drawn goes on top of the cached scene.
+        // The ink stroke being drawn goes on top of the cached scene, its tip drawn slightly
+        // ahead of the input.
+        let ppp = self.pixels_per_point as f64;
         let active = self.active.as_ref().filter(|a| !a.stroke.is_eraser()).map(|a| {
             let f = self.camera.level_frame(a.stroke.level, vp);
+            let predicted = match (a.raw, a.stroke.points.last()) {
+                (Some((pos, _)), Some(last)) if a.shape.is_none() && a.stroke.brush != Brush::Fill => {
+                    let mut d = [a.raw_vel[0] * PREDICT_AHEAD, a.raw_vel[1] * PREDICT_AHEAD];
+                    let len = d[0].hypot(d[1]);
+                    let max = PREDICT_MAX * ppp;
+                    if len > max {
+                        d = [d[0] * max / len, d[1] * max / len];
+                    }
+                    let l = f.screen_to_local([pos[0] + d[0], pos[1] + d[1]], &a.stroke.anchor, a.stroke.cache.anchor_fast);
+                    Some(StrokePoint { x: l[0] as f32, y: l[1] as f32, pressure: last.pressure })
+                }
+                _ => None,
+            };
             ActiveDraw {
                 stroke: &a.stroke,
                 layer: self.doc.layer_pos(a.stroke.layer) as u16,
@@ -1799,6 +1835,7 @@ impl CanvasApp {
                 scale: f.scale,
                 frozen: &a.frozen,
                 tail_from: a.frozen_upto,
+                predicted,
             }
         });
         let prims = ctx.tessellate(output.shapes, output.pixels_per_point);

@@ -250,6 +250,8 @@ pub struct ActiveDraw<'a> {
     pub frozen: &'a [Mesh],
     /// First point of the live tail (the last frozen part ends here too).
     pub tail_from: usize,
+    /// Extra point after the last one, drawn only (input extrapolated to hide latency).
+    pub predicted: Option<canvas_core::stroke::StrokePoint>,
 }
 
 /// What the app wants drawn this frame.
@@ -1040,7 +1042,21 @@ impl Renderer {
         let t_active = Instant::now();
         if let Some(a) = input.active {
             let lod = lod_for(a.stroke.level, input.log_zoom).min(2);
-            let tail = tessellate_part(a.stroke, a.tail_from.min(a.stroke.points.len().saturating_sub(1))..a.stroke.points.len(), lod);
+            let from = a.tail_from.min(a.stroke.points.len().saturating_sub(1));
+            let tail = match a.predicted {
+                Some(p) => {
+                    // The tail plus the predicted tip, as a throwaway stroke.
+                    let s = a.stroke;
+                    let mut t = Stroke::new(s.id, s.level, s.anchor.clone(), s.color, s.width);
+                    t.brush = s.brush;
+                    t.flat_caps = [s.flat_caps[0] && from == 0, false];
+                    t.points = s.points[from..].to_vec();
+                    t.points.push(p);
+                    t.refresh_cache();
+                    tessellate_part(&t, 0..t.points.len(), lod)
+                }
+                None => tessellate_part(a.stroke, from..a.stroke.points.len(), lod),
+            };
             let base = dyn_v.len();
             let first = dyn_i.len();
             for mesh in a.frozen.iter().chain(std::iter::once(&tail)) {
