@@ -258,6 +258,9 @@ pub struct FrameInput<'a> {
     pub doc: &'a canvas_core::document::Document,
     /// Stroke being drawn right now (not in the document yet) with its transform.
     pub active: Option<ActiveDraw<'a>>,
+    /// Draw the scene cache first, with its corners at these screen points
+    /// (texture corners (0,0), (1,0), (1,1), (0,1)).
+    pub scene: Option<[[f64; 2]; 4]>,
     /// Reference photos to draw below the strokes, bottom first.
     pub images: &'a [ImageDraw<'a>],
     /// Strokes added this frame (just drawn): tessellated right away, whatever the budget, so
@@ -273,6 +276,15 @@ pub struct FrameInput<'a> {
     /// egui texture updates; always consumed, even when the frame is skipped.
     pub textures: egui::TexturesDelta,
 }
+
+struct SceneCache {
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    size: [u32; 2],
+}
+
+/// Image id used for the scene cache quad.
+const SCENE_CACHE_ID: u64 = u64::MAX;
 
 /// Per-size render targets: strokes are drawn with MSAA into a transparent layer (so the
 /// eraser can clear pixels), which is then put over the background on the screen.
@@ -309,6 +321,11 @@ pub struct Renderer {
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     targets: Option<Targets>,
+    /// Targets sized for the scene cache (kept separately so neither size thrashes).
+    cache_targets: Option<Targets>,
+    /// Last fully rendered scene (background, photos, layers; no UI), shown transformed while
+    /// the view moves so gestures cost the same however big the drawing is.
+    scene_cache: Option<SceneCache>,
     chunks: Vec<Chunk>,
     meshes: HashMap<(StrokeId, u32), CachedMesh>,
     workers: Workers,
@@ -581,6 +598,8 @@ impl Renderer {
             uniform_buf,
             bind_group,
             targets: None,
+            cache_targets: None,
+            scene_cache: None,
             chunks: Vec::new(),
             meshes: HashMap::new(),
             workers: Workers::new(),
@@ -771,6 +790,36 @@ impl Renderer {
         }
     }
 
+    /// Renders the scene (no UI) into the scene cache texture of `size`.
+    pub fn render_scene_cache(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat, size: [u32; 2], input: FrameInput) {
+        if self.scene_cache.as_ref().is_none_or(|c| c.size != size) {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("scene cache"),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&Default::default());
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scene cache"),
+                layout: &self.image_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.image_sampler) },
+                ],
+            });
+            self.scene_cache = Some(SceneCache { view, bind_group, size });
+        }
+        let view = self.scene_cache.as_ref().expect("created").view.clone();
+        std::mem::swap(&mut self.targets, &mut self.cache_targets);
+        self.render_to(device, queue, format, size, &view, input);
+        std::mem::swap(&mut self.targets, &mut self.cache_targets);
+    }
+
     /// Renders a complete frame offscreen and returns straight RGBA pixels (row-major).
     /// `size[0]` must be a multiple of 64 (texture copy row alignment).
     pub fn render_rgba(
@@ -795,6 +844,7 @@ impl Renderer {
         let view = texture.create_view(&Default::default());
         self.unlimited_budget = true;
         // The main targets are sized for the window; keep them for the next frame.
+        // Own targets for the export size; the window's stay for the next frame.
         let window_targets = self.targets.take();
         self.render_to(device, queue, format, size, &view, input);
         self.targets = window_targets;
@@ -1019,6 +1069,19 @@ impl Renderer {
         let mut image_v: Vec<ImageVertex> = Vec::new();
         let mut image_draws: Vec<(u64, u32, u32)> = Vec::new();
         let guard = [-vp[0], -vp[1], 2.0 * vp[0], 2.0 * vp[1]];
+        if let (Some(c), true) = (input.scene, self.scene_cache.is_some()) {
+            let quad = [[c[0][0], c[0][1], 0.0, 0.0], [c[1][0], c[1][1], 1.0, 0.0], [c[2][0], c[2][1], 1.0, 1.0], [c[3][0], c[3][1], 0.0, 1.0]];
+            let poly = clip_polygon4(&quad, guard);
+            if poly.len() >= 3 {
+                let first = image_v.len() as u32;
+                for k in 1..poly.len() - 1 {
+                    for q in [poly[0], poly[k], poly[k + 1]] {
+                        image_v.push(ImageVertex { pos: [q[0] as f32, q[1] as f32], uv: [q[2] as f32, q[3] as f32], opacity: 1.0 });
+                    }
+                }
+                image_draws.push((SCENE_CACHE_ID, first, image_v.len() as u32));
+            }
+        }
         for img in input.images {
             let c = img.corners;
             let (x0, x1) = (c.iter().map(|p| p[0]).fold(f64::MAX, f64::min), c.iter().map(|p| p[0]).fold(f64::MIN, f64::max));
@@ -1162,7 +1225,12 @@ impl Renderer {
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, self.image_vbuf.slice(..));
                 for (id, a, b) in &image_draws {
-                    pass.set_bind_group(1, &self.image_textures[id].bind_group, &[]);
+                    let bg = if *id == SCENE_CACHE_ID {
+                        &self.scene_cache.as_ref().expect("checked").bind_group
+                    } else {
+                        &self.image_textures[id].bind_group
+                    };
+                    pass.set_bind_group(1, bg, &[]);
                     pass.draw(*a..*b, 0..1);
                 }
             }

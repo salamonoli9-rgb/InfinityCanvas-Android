@@ -265,23 +265,40 @@ fn perf_10k_strokes() {
             break;
         }
     }
-    let n = 30;
-    let start = std::time::Instant::now();
+    let n = 20;
+    // Full renders: the view settles between frames, so the whole scene is drawn.
+    let mut full = std::time::Duration::ZERO;
     for i in 0..n {
         app.pan([if i % 2 == 0 { 0.3 } else { -0.3 }, 0.0]);
-        gpu.frame(&mut app);
+        std::thread::sleep(std::time::Duration::from_millis(170));
+        let t = std::time::Instant::now();
+        gpu.frame_once(&mut app);
+        full += t.elapsed();
     }
-    let per_frame = start.elapsed() / (n * 3); // gpu.frame renders 3 frames
-    eprintln!("10k visible strokes: {per_frame:?} per frame (incl. GPU sync + readback)");
-    // Zoomed in on one area: most strokes culled.
-    app.wheel_zoom([190.0, 150.0], 4.0);
-    gpu.frame(&mut app);
-    let start = std::time::Instant::now();
+    eprintln!("10k visible strokes, full render: {:?} per frame (incl. GPU sync + readback)", full / n);
+    // During a gesture: the cached scene is moved around.
+    let t = std::time::Instant::now();
     for i in 0..n {
-        app.pan([if i % 2 == 0 { 0.3 } else { -0.3 }, 0.0]);
-        gpu.frame(&mut app);
+        app.pan([if i % 2 == 0 { 3.0 } else { -2.0 }, 1.0]);
+        gpu.frame_once(&mut app);
     }
-    eprintln!("zoomed 16x: {:?} per frame", start.elapsed() / (n * 3));
+    let moving = t.elapsed() / n;
+    eprintln!("10k visible strokes, while panning: {moving:?} per frame");
+    // Drawing over it: the cached scene plus the stroke in progress.
+    std::thread::sleep(std::time::Duration::from_millis(170));
+    gpu.frame_once(&mut app);
+    mouse(&mut app, Phase::Down, [100.0, 280.0], 1000.0);
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        mouse(&mut app, Phase::Move, [100.0 + i as f64 * 20.0, 280.0], 1000.0 + i as f64 / 60.0);
+        gpu.frame_once(&mut app);
+    }
+    let drawing = t.elapsed() / n;
+    mouse(&mut app, Phase::Up, [500.0, 280.0], 1001.0);
+    eprintln!("10k visible strokes, while drawing: {drawing:?} per frame");
+    // (On a fast desktop GPU all three are dominated by the readback; the difference shows on
+    // phones – see the frame stats in logcat.)
+    let _ = (moving, drawing, full);
 }
 
 #[test]

@@ -124,6 +124,13 @@ pub struct CanvasApp {
     pub active_layer: u32,
     /// Strokes added since the last frame (rendered without delay).
     urgent: Vec<canvas_core::stroke::StrokeId>,
+    /// Bumped on every change of what is drawn (strokes, photos, layers).
+    content_rev: u64,
+    /// What the renderer's scene cache holds.
+    cache: Option<CacheInfo>,
+    /// Camera of the previous frame and when it last moved.
+    last_cam: Option<Camera>,
+    last_move: Instant,
     /// Camera flight to a bookmark in progress, with its start time.
     flight: Option<(canvas_core::flight::Flight, Instant)>,
     /// Short message at the bottom of the screen, with the time it appeared.
@@ -178,6 +185,24 @@ impl FrameStats {
         }
     }
 }
+
+/// The scene cache: a full render (with a margin around the screen) at `cam`.
+struct CacheInfo {
+    cam: Camera,
+    /// Viewport of the cache render (screen plus margins), px.
+    vp: [f64; 2],
+    rev: u64,
+    /// All strokes had their meshes (nothing was still being tessellated).
+    complete: bool,
+    made: Instant,
+}
+
+/// Extra area rendered around the screen for the scene cache (fraction of each side).
+const CACHE_MARGIN: f64 = 0.15;
+/// The view counts as moving for this long after the camera last changed.
+const MOVE_SETTLE: Duration = Duration::from_millis(150);
+/// While moving, the cache is re-rendered at most this often (and only when needed).
+const CACHE_REFRESH: Duration = Duration::from_millis(250);
 
 /// How to turn a photo into a drawing.
 #[derive(Clone, Copy, Debug)]
@@ -258,6 +283,10 @@ impl CanvasApp {
             layer_panel: ui::LayerPanel::default(),
             active_layer: 0,
             urgent: Vec::new(),
+            content_rev: 0,
+            cache: None,
+            last_cam: None,
+            last_move: Instant::now(),
             flight: None,
             toast: None,
             save_thread: None,
@@ -306,6 +335,8 @@ impl CanvasApp {
         self.decoded.clear();
         self.image_edit = None;
         self.flight = None;
+        self.cache = None;
+        self.content_rev += 1;
         self.active_layer = self.doc.layers.last().map_or(0, |l| l.id);
         self.save_path = path;
         self.dirty = false;
@@ -361,6 +392,7 @@ impl CanvasApp {
                 visible: &visible,
                 doc: &self.doc,
                 active: None,
+                scene: None,
                 images: &images,
                 layer_opacity: &layer_opacity,
                 urgent: &[],
@@ -769,6 +801,7 @@ impl CanvasApp {
                 visible: &visible,
                 doc: &self.doc,
                 active: None,
+                scene: None,
                 images: &images,
                 layer_opacity: &layer_opacity,
                 urgent: &[],
@@ -817,6 +850,7 @@ impl CanvasApp {
                 visible: &visible,
                 doc: &self.doc,
                 active: None,
+                scene: None,
                 images: &[],
                 layer_opacity: &layer_opacity,
                 urgent: &[],
@@ -918,6 +952,7 @@ impl CanvasApp {
         } else {
             self.image_edit = None;
         }
+        self.content_rev += 1;
         self.wants_redraw = true;
     }
 
@@ -1265,6 +1300,7 @@ impl CanvasApp {
     }
 
     fn changed(&mut self) {
+        self.content_rev += 1;
         self.dirty = true;
         self.last_change = Instant::now();
         self.wants_redraw = true;
@@ -1529,12 +1565,114 @@ impl CanvasApp {
         // Scene.
         let urgent = std::mem::take(&mut self.urgent);
         self.decode_images();
-        let full = [0.0, 0.0, self.viewport[0], self.viewport[1]];
-        let tq = Instant::now();
-        let visible = self.doc.query(&self.camera, self.viewport, full);
-        let query_time = tq.elapsed().as_secs_f64();
-        let active = self.active.as_ref().map(|a| {
-            let f = self.camera.level_frame(a.stroke.level, self.viewport);
+        let layer_opacity: Vec<f32> = self.doc.layers.iter().map(|l| l.opacity).collect();
+        let vp = self.viewport;
+        let (device, queue, format) = target.device_queue_format();
+
+        // Is the view moving (gesture, inertia, flight, wheel)?
+        if self.last_cam.as_ref() != Some(&self.camera) {
+            self.last_move = now;
+            self.last_cam = Some(self.camera.clone());
+        }
+        let moving = now - self.last_move < MOVE_SETTLE || self.inertia.active() || self.flight.is_some();
+        let eraser_active = self.active.as_ref().is_some_and(|a| a.stroke.is_eraser());
+        let drawing_ink = self.active.is_some() && !eraser_active;
+        let canvas = self.screen == Screen::Canvas;
+
+        // Scene cache: re-render it unless it can stand in for this frame. How well it fits the
+        // current view: 0 = fine, 1 = slightly off (refresh soon), 2 = far off (refresh now).
+        let cache_misfit = |c: &CacheInfo, cam: &Camera| -> u8 {
+            let ratio = (cam.log_zoom - c.cam.log_zoom).exp2();
+            let covered = [[0.0, 0.0], [vp[0], 0.0], [vp[0], vp[1]], [0.0, vp[1]], [vp[0] * 0.5, vp[1] * 0.5]]
+                .iter()
+                .filter(|p| {
+                    let q = c.cam.world_to_screen(&cam.screen_to_world(**p, vp), c.vp);
+                    q[0] >= 0.0 && q[1] >= 0.0 && q[0] <= c.vp[0] && q[1] <= c.vp[1]
+                })
+                .count();
+            if !(0.4..=2.5).contains(&ratio) || covered <= 2 {
+                2
+            } else if !(0.6..=1.6).contains(&ratio) || covered < 5 {
+                1
+            } else {
+                0
+            }
+        };
+        let rerender = match &self.cache {
+            _ if !canvas => false,
+            None => true,
+            Some(c) if c.rev != self.content_rev || eraser_active || self.image_edit.is_some() => true,
+            Some(c) if moving => match cache_misfit(c, &self.camera) {
+                0 => false,
+                1 => c.made.elapsed() >= CACHE_REFRESH,
+                _ => true,
+            },
+            Some(_) if drawing_ink => false,
+            Some(c) => c.cam != self.camera || !c.complete,
+        };
+        let mut visible_count = 0;
+        let mut query_time = 0.0;
+        if rerender {
+            let m = [(vp[0] * CACHE_MARGIN).round(), (vp[1] * CACHE_MARGIN).round()];
+            let cvp = [vp[0] + 2.0 * m[0], vp[1] + 2.0 * m[1]];
+            let tq = Instant::now();
+            let visible = self.doc.query(&self.camera, cvp, [0.0, 0.0, cvp[0], cvp[1]]);
+            query_time = tq.elapsed().as_secs_f64();
+            visible_count = visible.len();
+            let images = self.image_draws(&self.camera, cvp);
+            // The eraser is previewed inside the scene (it removes ink there).
+            let active = self.active.as_ref().filter(|a| a.stroke.is_eraser()).map(|a| {
+                let f = self.camera.level_frame(a.stroke.level, cvp);
+                ActiveDraw {
+                    stroke: &a.stroke,
+                    layer: self.doc.layer_pos(a.stroke.layer) as u16,
+                    offset: f.anchor_to_screen(&a.stroke.anchor, a.stroke.cache.anchor_fast),
+                    scale: f.scale,
+                    frozen: &a.frozen,
+                    tail_from: a.frozen_upto,
+                }
+            });
+            renderer.render_scene_cache(
+                device,
+                queue,
+                format,
+                [cvp[0] as u32, cvp[1] as u32],
+                FrameInput {
+                    visible: &visible,
+                    doc: &self.doc,
+                    active,
+                    scene: None,
+                    images: &images,
+                    layer_opacity: &layer_opacity,
+                    urgent: &urgent,
+                    log_zoom: self.camera.log_zoom,
+                    rotation: self.camera.rot(),
+                    background: BACKGROUND,
+                    egui: None,
+                    textures: Default::default(),
+                },
+            );
+            self.cache = Some(CacheInfo {
+                cam: self.camera.clone(),
+                vp: cvp,
+                rev: self.content_rev,
+                complete: !renderer.needs_another_frame,
+                made: Instant::now(),
+            });
+        }
+        let incomplete = self.cache.as_ref().is_some_and(|c| !c.complete);
+        // Where the cached scene lands on screen now.
+        let scene = if canvas {
+            self.cache.as_ref().map(|c| {
+                [[0.0, 0.0], [c.vp[0], 0.0], [c.vp[0], c.vp[1]], [0.0, c.vp[1]]]
+                    .map(|p| self.camera.world_to_screen(&c.cam.screen_to_world(p, c.vp), vp))
+            })
+        } else {
+            None
+        };
+        // The ink stroke being drawn goes on top of the cached scene.
+        let active = self.active.as_ref().filter(|a| !a.stroke.is_eraser()).map(|a| {
+            let f = self.camera.level_frame(a.stroke.level, vp);
             ActiveDraw {
                 stroke: &a.stroke,
                 layer: self.doc.layer_pos(a.stroke.layer) as u16,
@@ -1544,18 +1682,17 @@ impl CanvasApp {
                 tail_from: a.frozen_upto,
             }
         });
-        let images = if self.screen == Screen::Canvas { self.image_draws(&self.camera, self.viewport) } else { Vec::new() };
-        let layer_opacity: Vec<f32> = self.doc.layers.iter().map(|l| l.opacity).collect();
         let prims = ctx.tessellate(output.shapes, output.pixels_per_point);
         renderer.render_target(
             target,
             FrameInput {
-                visible: &visible,
+                visible: &[],
                 doc: &self.doc,
                 active,
-                images: &images,
+                scene,
+                images: &[],
                 layer_opacity: &layer_opacity,
-                urgent: &urgent,
+                urgent: &[],
                 log_zoom: self.camera.log_zoom,
                 rotation: self.camera.rot(),
                 background: BACKGROUND,
@@ -1563,7 +1700,11 @@ impl CanvasApp {
                 textures: output.textures_delta,
             },
         );
-        self.stats.record(now.elapsed().as_secs_f64(), visible.len(), query_time, renderer.timings);
+        self.stats.record(now.elapsed().as_secs_f64(), visible_count, query_time, renderer.timings);
+        if incomplete || (canvas && moving) {
+            // Keep going: missing meshes are on their way / the sharp frame follows the gesture.
+            self.wants_redraw = true;
+        }
         let egui_repaint = output.viewport_output.values().any(|v| v.repaint_delay.is_zero());
         self.wants_redraw |= renderer.needs_another_frame || egui_repaint || self.inertia.active() || lib_busy || toast_visible;
         output.platform_output
