@@ -1299,3 +1299,24 @@ fn nudging_redraws_only_the_bent_strokes() {
     let px = gpu.frame(&mut app);
     assert!((255..285).any(|y| dark(&px, 550, y)) && !dark(&px, 550, 220));
 }
+
+#[test]
+fn rotating_the_screen_refreshes_the_scene() {
+    let Some(mut gpu) = headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let mut app = new_app();
+    // A short line through the middle of the screen.
+    draw_line(&mut app, 150.0, 334.0, 434.0);
+    gpu.frame(&mut app);
+    let before = app.scene_renders;
+    // "Rotate" to another shape and back: each new shape renders the scene again, and the
+    // drawing stays around the middle of the screen.
+    app.resize([H, W]);
+    gpu.frame_once(&mut app);
+    assert!(app.scene_renders > before, "a new screen shape gets a fresh scene");
+    app.resize([W, H]);
+    let px = gpu.frame(&mut app);
+    assert!(dark(&px, 384, 150) && dark(&px, 340, 150), "the line is still in the middle");
+}

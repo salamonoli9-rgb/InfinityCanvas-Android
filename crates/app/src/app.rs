@@ -102,6 +102,8 @@ pub struct CanvasApp {
     pub wants_redraw: bool,
     /// Height (points) covered by the status bar / notch at the top.
     pub safe_top: f32,
+    /// Width (points) covered on the left and right (landscape: cutout, navigation bar).
+    pub safe_side: [f32; 2],
     stats: FrameStats,
     projects: Option<Projects>,
     /// Name of the open project (empty in single-file mode).
@@ -397,6 +399,7 @@ impl CanvasApp {
             last_frame: Instant::now(),
             wants_redraw: true,
             safe_top: 0.0,
+            safe_side: [0.0, 0.0],
             stats: FrameStats::default(),
             projects: None,
             project: String::new(),
@@ -690,8 +693,17 @@ impl CanvasApp {
         }
     }
 
+    /// The window changed size (e.g. the screen was rotated). The camera keeps the same
+    /// point in the middle of the screen and the same scale, so the drawing stays put and the
+    /// newly visible area simply appears.
     pub fn resize(&mut self, size: [u32; 2]) {
-        self.viewport = [size[0].max(1) as f64, size[1].max(1) as f64];
+        let vp = [size[0].max(1) as f64, size[1].max(1) as f64];
+        if vp != self.viewport {
+            // The cached scene was rendered for the old shape of the screen.
+            self.cache = None;
+            self.inertia = Inertia::default();
+        }
+        self.viewport = vp;
         self.wants_redraw = true;
     }
 
@@ -2057,6 +2069,7 @@ impl CanvasApp {
             log_zoom: self.camera.log_zoom,
             rotation: self.camera.rotation,
             strokes: self.doc.len(),
+            safe_side: self.safe_side,
         };
         let mut actions = ui::Actions::default();
         let mut gallery_actions = Vec::new();

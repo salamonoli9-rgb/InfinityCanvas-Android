@@ -119,6 +119,8 @@ pub struct Info {
     /// View rotation in radians.
     pub rotation: f64,
     pub strokes: usize,
+    /// Screen edges covered by system bars / cutouts on the left and right (points).
+    pub safe_side: [f32; 2],
 }
 
 #[derive(Default, Debug)]
@@ -327,12 +329,13 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
 
     // Explicit rows instead of `horizontal_wrapped`: egui's sliders are nested horizontal
     // groups that never wrap, which pushed the toolbar off narrow phone screens.
-    let screen_w = ctx.content_rect().width();
+    let [left, right] = info.safe_side;
+    let screen_w = ctx.content_rect().width() - left - right;
     let frame = egui::Frame::popup(&ctx.global_style()).corner_radius(CornerRadius::same(12));
     let inner_w = (screen_w - 16.0 - frame.total_margin().sum().x).max(150.0);
     let compact = inner_w < 760.0;
     let anchor = if compact { Align2::LEFT_TOP } else { Align2::CENTER_TOP };
-    let offset = if compact { [8.0, 8.0 + safe_top] } else { [0.0, 8.0 + safe_top] };
+    let offset = if compact { [8.0 + left, 8.0 + safe_top] } else { [(left - right) * 0.5, 8.0 + safe_top] };
     let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(anchor, offset).show(ctx, |ui| {
         frame.show(ui, |ui| {
             ui.set_max_width(inner_w);
@@ -1190,7 +1193,7 @@ mod layout_tests {
             st.spacing.button_padding = egui::vec2(8.0, 6.0);
             st.spacing.slider_width = 120.0;
         });
-        let info = Info { can_undo: true, can_redo: false, log_zoom: -33.4, rotation: -2.5, strokes: 2 };
+        let info = Info { can_undo: true, can_redo: false, log_zoom: -33.4, rotation: -2.5, strokes: 2, safe_side: [0.0, 0.0] };
         let mut rect = Rect::NOTHING;
         let shapes = [None, Some(Shape::Line), Some(Shape::Rectangle), Some(Shape::Ellipse)];
         for (brush, shape) in Brush::ALL.iter().flat_map(|b| shapes.iter().map(move |sh| (*b, *sh))) {

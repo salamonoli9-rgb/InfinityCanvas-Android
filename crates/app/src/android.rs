@@ -75,7 +75,9 @@ impl State {
         }
         let r = app.content_rect();
         log::debug!("window {size:?}, content rect {:?}", (r.left, r.top, r.right, r.bottom));
-        self.canvas.safe_top = r.top.max(0) as f32 / self.canvas.pixels_per_point;
+        let ppp = self.canvas.pixels_per_point;
+        self.canvas.safe_top = r.top.max(0) as f32 / ppp;
+        self.canvas.safe_side = [r.left.max(0) as f32 / ppp, (size[0] as i32 - r.right).max(0) as f32 / ppp];
     }
 
     fn time(&self, ns: i64) -> f64 {
