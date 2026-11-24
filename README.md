@@ -1,238 +1,241 @@
+🇬🇧 English | [🇵🇱 Polski](README.pl.md)
+
 # InfinityCanvas Android
 
-**Gotowa aplikacja:** [`apk/InfinityCanvas-Android.apk`](apk/InfinityCanvas-Android.apk) — pobierz na telefon z Androidem (8.0+, ARM64) i zainstaluj (trzeba zezwolić na instalację z nieznanych źródeł).
+**Ready-to-install app:** [`apk/InfinityCanvas-Android.apk`](apk/InfinityCanvas-Android.apk) — download it to an Android phone (8.0+, ARM64) and install it (you need to allow installing from unknown sources).
 
-Aplikacja do rysowania z nieskończonym płótnem i nieograniczonym przybliżaniem/oddalaniem
-(w duchu Endless Paper). Kreski są wektorami renderowanymi na nowo w każdej klatce, więc
-nigdy się nie rozpikselują. Ten sam kod działa na Androidzie i na desktopie Linux.
+A drawing app with an infinite canvas and unlimited zoom in and out (in the spirit of
+Endless Paper). Strokes are vectors re-rendered every frame, so they never get pixelated.
+The same code runs on Android and on desktop Linux.
 
-## Jak to działa (w skrócie)
+## How it works (in short)
 
-- **Współrzędne o dowolnej precyzji.** Pozycje na płótnie to liczby `mantysa · 2^wykładnik`
-  z mantysą dowolnej długości (`crates/core/src/coords.rs`). Dodawanie i odejmowanie są
-  dokładne, więc nie ma limitu zoomu w żadną stronę.
-- **Poziom skali kreski.** Kreska pamięta `floor(log2 zoomu)` z chwili rysowania, dokładną
-  kotwicę (całkowitą w jednostkach swojego poziomu) i punkty jako małe `f32` względem kotwicy.
-- **Obrót widoku** jest stosowany dopiero po dokładnym odjęciu `kotwica − kamera`, więc nie
-  zmniejsza precyzji na żadnej głębokości.
-- **Transformacja względem kamery.** W każdej klatce liczone jest dokładnie `kotwica − kamera`
-  i dopiero wynik trafia do `f32` jako przesunięcie + skala instancji na GPU. Kreski oglądane
-  w ogromnym powiększeniu (> 2^6 względem chwili rysowania) są przeliczane w `f64` na CPU
-  i przycinane do ekranu, więc krawędzie zostają ostre i nieruchome.
-- **Gumka** to też kreska (kolor z alfą 0): kreski rysują się do przezroczystej warstwy, w której
-  ślad gumki zeruje piksele, a warstwa jest potem nakładana na tło.
-- **Indeks przestrzenny** per poziom skali (wielorozdzielcza siatka haszowana), pomijanie kresek
-  poza ekranem, mniejszych od 0,5 px i astronomicznie większych od ekranu; cache tesselacji
-  (lyon) z poziomami szczegółowości; MSAA 4×.
+- **Arbitrary-precision coordinates.** Canvas positions are numbers `mantissa · 2^exponent`
+  with a mantissa of any length (`crates/core/src/coords.rs`). Addition and subtraction are
+  exact, so there is no zoom limit in either direction.
+- **Stroke scale level.** A stroke remembers `floor(log2 zoom)` from the moment it was drawn,
+  an exact anchor (an integer in units of its level) and its points as small `f32` values
+  relative to the anchor.
+- **View rotation** is applied only after the exact subtraction `anchor − camera`, so it does not
+  reduce precision at any depth.
+- **Camera-relative transform.** Every frame computes `anchor − camera` exactly, and only the result
+  goes into `f32` as an instance offset + scale on the GPU. Strokes viewed at huge magnification
+  (> 2^6 relative to when they were drawn) are recomputed in `f64` on the CPU and clipped to the
+  screen, so edges stay sharp and still.
+- **The eraser** is a stroke too (colour with alpha 0): strokes are drawn into a transparent layer
+  in which the eraser trail clears pixels, and the layer is then composited over the background.
+- **Spatial index** per scale level (multi-resolution hashed grid), culling of strokes that are
+  off-screen, smaller than 0.5 px or astronomically larger than the screen; tessellation cache
+  (lyon) with levels of detail; 4× MSAA.
 
-## Struktura
+## Structure
 
 ```
-crates/core   logika bez GPU: współrzędne, kamera, kreski, indeks, cofnij/ponów, zapis
-crates/app    renderer wgpu, gesty, pasek narzędzi egui, launchery:
-              desktop.rs (winit) i android.rs (NativeActivity / android-activity)
-android/      AndroidManifest.xml i zasoby (ikona, nazwa)
+crates/core   GPU-free logic: coordinates, camera, strokes, index, undo/redo, saving
+crates/app    wgpu renderer, gestures, egui toolbar, launchers:
+              desktop.rs (winit) and android.rs (NativeActivity / android-activity)
+android/      AndroidManifest.xml and resources (icon, name)
 build_android.sh
 ```
 
-## Wymagania
+## Requirements
 
 - Rust (stable) – `rustup`
-- Desktop: sterownik Vulkan lub OpenGL (Mesa wystarczy)
-- Android: Android SDK z `build-tools`, `platforms;android-36`, NDK, `platform-tools` (adb),
-  `cargo install cargo-ndk`, `rustup target add aarch64-linux-android`, Java (wystarczy JRE –
-  do podpisywania APK). Gradle ani JDK nie są potrzebne.
+- Desktop: a Vulkan or OpenGL driver (Mesa is enough)
+- Android: Android SDK with `build-tools`, `platforms;android-36`, NDK, `platform-tools` (adb),
+  `cargo install cargo-ndk`, `rustup target add aarch64-linux-android`, Java (a JRE is enough –
+  for signing the APK). Neither Gradle nor a JDK is needed.
 
-Skrypt domyślnie szuka SDK w `~/Android/Sdk` (można nadpisać zmienną `ANDROID_HOME`).
+By default the script looks for the SDK in `~/Android/Sdk` (override with `ANDROID_HOME`).
 
 ## Desktop
 
 ```bash
-cargo run --release                 # projekty w ~/.local/share/infinite-canvas/projects/
-cargo run --release -- inny.icnv    # otwiera jeden konkretny plik
+cargo run --release                 # projects in ~/.local/share/infinite-canvas/projects/
+cargo run --release -- other.icnv   # opens one specific file
 ```
 
-| Akcja | Sterowanie |
+| Action | Control |
 |---|---|
-| rysowanie | lewy przycisk myszy |
-| przesuwanie | prawy lub środkowy przycisk + przeciągnięcie; przewijanie touchpadem |
-| zoom wokół kursora | kółko myszy (Ctrl + kółko = drobniej); Ctrl + przewijanie lub szczypanie na touchpadzie |
-| obrót wokół kursora | Alt + kółko myszy (7,5° na ząbek); przycisk z kątem na pasku prostuje płótno |
-| cofnij / ponów | Ctrl+Z / Ctrl+Shift+Z lub Ctrl+Y |
-| pióro / gumka | P / E |
-| powrót do początku | Home |
+| draw | left mouse button |
+| pan | right or middle button + drag; touchpad scrolling |
+| zoom around the cursor | mouse wheel (Ctrl + wheel = finer); Ctrl + scroll or pinch on the touchpad |
+| rotate around the cursor | Alt + mouse wheel (7.5° per notch); the angle button on the toolbar straightens the canvas |
+| undo / redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
+| pen / eraser | P / E |
+| back to the start | Home |
 
 ## Android
 
-1. Na telefonie włącz **Opcje programisty** (Ustawienia → Informacje o telefonie → 7× stuknij
-   „Numer kompilacji”), potem w Opcjach programisty włącz **Debugowanie USB**.
-2. Podłącz telefon kablem i zaakceptuj na nim okno „Zezwolić na debugowanie USB?”.
-3. Sprawdź: `~/Android/Sdk/platform-tools/adb devices` – telefon powinien mieć status `device`.
-4. Zbuduj i zainstaluj:
+1. On the phone, enable **Developer options** (Settings → About phone → tap
+   “Build number” 7 times), then turn on **USB debugging** in Developer options.
+2. Connect the phone with a cable and accept the “Allow USB debugging?” prompt on it.
+3. Check: `~/Android/Sdk/platform-tools/adb devices` – the phone should show as `device`.
+4. Build and install:
 
 ```bash
-./build_android.sh              # release, instaluje i uruchamia
-./build_android.sh --debug      # szybsza kompilacja
-./build_android.sh --no-install # tylko target/android/infinite-canvas.apk
-./build_android.sh --to-files   # dodatkowo kopia APK w telefonie: Pobrane/InfinityCanvas-Android.apk
+./build_android.sh              # release, installs and launches
+./build_android.sh --debug      # faster build
+./build_android.sh --no-install # only target/android/infinite-canvas.apk
+./build_android.sh --to-files   # also copies the APK to the phone: Download/InfinityCanvas-Android.apk
 ```
 
-Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
+App logs: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
 
-### Pędzle
+### Brushes
 
-Przycisk z nazwą pędzla na pasku otwiera listę – przy każdym pędzlu jest próbka, jak rysuje
-(w aktualnym kolorze, renderowana tym samym silnikiem co rysunek). Każdy pędzel pamięta własną
-grubość.
+The button with the brush name on the toolbar opens a list – each brush has a sample of how it
+draws (in the current colour, rendered by the same engine as the drawing). Every brush remembers
+its own width.
 
-| Pędzel | Działanie |
+| Brush | Behaviour |
 |---|---|
-| Pióro | grubość z naciskiem |
-| Pióro wieczne | stalówka pod kątem: grubość zależy od kierunku ruchu (i nacisku) |
-| Pióro dynamiczne | szybki ruch = cieńsza linia |
-| Stała grubość | zawsze ta sama grubość |
-| Ołówek miękki / twardy | półprzezroczysty, z ziarnem papieru; nacisk = ciemniej |
-| Marker | półprzezroczysty, ścięta końcówka, nakładane kreski ciemnieją |
-| Kropkowana | kropki co ~2 grubości |
-| Długopis | cienki, równy |
-| Pędzel | mocno reaguje na nacisk, zwężone końce |
-| Kredka / Węgiel | grube ziarno, nacisk = ciemniej |
-| Zakreślacz | szeroki, przezroczysty, ścięty |
-| Aerograf | miękkie, rozmyte brzegi |
-| Akwarela | przezroczysta, miękka, ciemniejszy brzeg, lekka faktura |
-| Spray | rozproszone kropki (te same przy każdym zoomie) |
-| Wypełnienie | **stuknięcie** = wiadro z farbą: wypełnia obszar zamknięty kreskami (omija wyspy w środku); **przeciągnięcie** = rysuje wypełniony kształt |
+| Pen | width follows pressure |
+| Fountain pen | angled nib: width depends on the direction of movement (and pressure) |
+| Dynamic pen | fast movement = thinner line |
+| Fixed width | always the same width |
+| Soft / Hard pencil | semi-transparent, with paper grain; pressure = darker |
+| Marker | semi-transparent, chisel tip, overlapping strokes get darker |
+| Dotted | dots every ~2 widths |
+| Ballpoint | thin and even |
+| Brush | reacts strongly to pressure, tapered ends |
+| Crayon / Charcoal | coarse grain, pressure = darker |
+| Highlighter | wide, transparent, chisel tip |
+| Airbrush | soft, blurred edges |
+| Watercolour | transparent, soft, darker rim, light texture |
+| Spray | scattered dots (the same at every zoom) |
+| Fill | **tap** = paint bucket: fills an area enclosed by strokes (skipping islands inside); **drag** = draws a filled shape |
 
-W tym samym menu jest **Kształt**: Odręcznie / Linia / Prostokąt / Elipsa – przeciągnięcie od
-rogu do rogu rysuje kształt aktualnym pędzlem (z „Wypełnieniem” – wypełniony). Linia przyciąga się
-do wielokrotności 45°, prawie-kwadrat do kwadratu, prawie-koło do koła.
+The same menu has **Shape**: Freehand / Line / Rectangle / Ellipse – dragging from corner to
+corner draws the shape with the current brush (with “Fill” – filled). Lines snap to multiples of
+45°, an almost-square to a square, an almost-circle to a circle.
 
-Wszystkie pędzle są wektorowe (ziarno ołówka liczone w shaderze we współrzędnych kreski), więc
-nie tracą ostrości przy zoomie. Kreska półprzezroczysta nie ciemnieje tam, gdzie nachodzi sama
-na siebie (bufor stencil).
+All brushes are vector-based (the pencil grain is computed in the shader in stroke coordinates),
+so they stay sharp when zooming. A semi-transparent stroke does not get darker where it overlaps
+itself (stencil buffer).
 
-### Zdjęcia
+### Photos
 
-**Więcej → Zdjęcia…** → **Dodaj zdjęcie** pokazuje siatkę zdjęć z galerii telefonu (za pierwszym
-razem Android pyta o dostęp do zdjęć; na komputerze: obrazy z `~/Obrazy`, `~/Pictures`,
-`~/Pobrane` albo przeciągnięty na okno plik). Po wybraniu:
+**More → Photos…** → **Add a photo** shows a grid of photos from the phone's gallery (the first
+time Android asks for photo access; on a computer: images from `~/Obrazy`, `~/Pictures`,
+`~/Pobrane` or a file dragged onto the window). After choosing one:
 
-- **Do odrysowania** – zdjęcie leży pod rysunkiem (gumka go nie ściera). Od razu można je
-  ustawić: jeden palec przesuwa, dwa skalują i obracają, „Gotowe” lub „Wstecz” kończy. W oknie
-  Zdjęcia: suwak krycia, „Przesuń / skaluj”, „Ukryj”, „Usuń”.
-- **Zamień na rysunek** – dwa style:
-  - **Kolorowy**: kolory zdjęcia zredukowane do 6–20 barw (k-średnie), plamy zamienione na
-    wypełnione kształty wektorowe (od największych do najmniejszych), opcjonalnie z konturami na
-    wierzchu – wychodzi kolorowa ilustracja,
-  - **Same kontury**: krawędzie zdjęcia (Canny) jako kreski aktualnym pędzlem, kolorem i grubością.
+- **For tracing** – the photo lies under the drawing (the eraser doesn't erase it). You can place
+  it right away: one finger moves it, two fingers scale and rotate it, “Done” or “Back” finishes.
+  In the Photos window: opacity slider, “Move / scale”, “Hide”, “Delete”.
+- **Turn into a drawing** – two styles:
+  - **Colourful**: the photo's colours are reduced to 6–20 colours (k-means) and the patches turned
+    into filled vector shapes (from largest to smallest), optionally with outlines on top – the
+    result is a colourful illustration,
+  - **Outlines only**: the photo's edges (Canny) as strokes in the current brush, colour and width.
 
-  Suwak „szczegóły” decyduje o liczbie barw / drobnych linii. Opcjonalnie blade zdjęcie zostaje
-  pod spodem. Jedno „Cofnij” usuwa całość. W oknie Zdjęcia przy każdym zdjęciu jest miniaturka.
+  The “detail” slider controls the number of colours / fine lines. Optionally a faded photo stays
+  underneath. One “Undo” removes it all. The Photos window shows a thumbnail next to each photo.
 
-Zdjęcie jest zapisywane w projekcie (JPEG, maks. 2048 px).
+The photo is saved in the project (JPEG, max. 2048 px).
 
-### Warstwy
+### Layers
 
-**Więcej → Warstwy…**: lista warstw (górna na górze). Stuknięcie nazwy wybiera warstwę, na której
-rysujesz (także gumka, wypełnienie i rysunki ze zdjęć trafiają na nią). Każda warstwa ma krycie
-(suwak), „Ukryj/Pokaż”, „W górę/W dół”, zmianę nazwy i usuwanie (z kreskami; kreski da się
-przywrócić „Cofnij”). Gumka ściera tylko na swojej warstwie. Każda warstwa jest renderowana do
-osobnej przezroczystej tekstury i nakładana z własnym kryciem.
+**More → Layers…**: a list of layers (the top one at the top). Tapping a name selects the layer you
+draw on (the eraser, fills and drawings made from photos go there too). Each layer has opacity
+(slider), “Hide/Show”, “Up/Down”, renaming and deleting (with its strokes; they can be brought back
+with “Undo”). The eraser only erases on its own layer. Each layer is rendered to a separate
+transparent texture and composited with its own opacity.
 
-### Zakładki
+### Bookmarks
 
-**Więcej → Zakładki…**: „Dodaj zakładkę” zapamiętuje obecny widok (miejsce, przybliżenie, obrót).
-Stuknięcie zakładki (lub „Leć”) płynnie przenosi kamerę: oddalenie, przelot, przybliżenie – także
-między miejscami odległymi o wiele rzędów wielkości, z dokładnym lądowaniem. Dotknięcie ekranu
-przerywa lot. Zakładki zapisują się w projekcie.
+**More → Bookmarks…**: “Add bookmark” remembers the current view (place, zoom, rotation).
+Tapping a bookmark (or “Fly”) moves the camera smoothly: zoom out, fly over, zoom in – even between
+places many orders of magnitude apart, with an exact landing. Touching the screen interrupts the
+flight. Bookmarks are saved in the project.
 
-**Wideo MP4** (w oknie Zakładki, od 2 zakładek): film z przelotem przez zakładki po kolei (postój
-na każdej, płynny lot między nimi), 768 px szerokości, 30 kl./s, proporcje ekranu. Na telefonie
-kodowany sprzętowo (MediaCodec H.264) i zapisywany w galerii (Filmy → „InfinityCanvas”), na
-komputerze przez `ffmpeg` do `~/Wideo/InfinityCanvas/`. Postęp widać na dole; „Wstecz” anuluje.
+**MP4 video** (in the Bookmarks window, from 2 bookmarks): a film flying through the bookmarks in
+order (a pause at each, a smooth flight between them), 768 px wide, 30 fps, screen proportions.
+On the phone it is hardware-encoded (MediaCodec H.264) and saved to the gallery (Movies →
+“InfinityCanvas”), on a computer via `ffmpeg` to `~/Wideo/InfinityCanvas/`. Progress is shown at
+the bottom; “Back” cancels.
 
-### Nagrywanie
+### Recording
 
-**Więcej → Nagrywaj wideo (MP4)** nagrywa płótno (rysowanie, przesuwanie, zoom – bez paska narzędzi
-i okien), 30 kl./s, 768 px szerokości. Czerwony przycisk w prawym górnym rogu pokazuje czas;
-stuknięcie kończy nagrywanie. Film trafia tam, gdzie wideo z zakładek (galeria → Filmy).
+**More → Record video (MP4)** records the canvas (drawing, panning, zooming – without the toolbar
+and windows), 30 fps, 768 px wide. A red button in the top-right corner shows the time; tapping it
+stops the recording. The film goes to the same place as bookmark videos (gallery → Movies).
 
-### Siatka
+### Grid
 
-**Więcej → Siatka**: kratka przyczepiona do płótna (obraca się z nim), zawsze 24–48 pt na ekranie –
-przy oddalaniu/przybliżaniu przechodzi na rzadszą/gęstszą (co 4. linia mocniejsza), dokładna na każdej
-głębokości. Gdy jest włączona, linie, prostokąty i elipsy przyciągają rogi do jej przecięć. Siatki nie
-ma w eksportach.
+**More → Grid**: a grid attached to the canvas (it rotates with it), always 24–48 pt on screen –
+when zooming out/in it switches to a sparser/denser one (every 4th line stronger), exact at every
+depth. When it is on, lines, rectangles and ellipses snap their corners to its intersections. The
+grid is not included in exports.
 
-### Eksport
+### Export
 
-**Więcej → Eksport do PNG** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej
-rozdzielczości ekranu: na telefonie w galerii (Obrazy → „InfinityCanvas”), na komputerze w
+**More → Export to PNG** saves what is visible on screen (without the toolbar) as a PNG at twice
+the screen resolution: on the phone to the gallery (Pictures → “InfinityCanvas”), on a computer to
 `~/Obrazy/InfinityCanvas/`.
 
-### Gesty
+### Gestures
 
-| Akcja | Gest |
+| Action | Gesture |
 |---|---|
-| rysowanie | rysik albo jeden palec |
-| przesuwanie + zoom | dwa palce (szczypanie wokół środka gestu), z bezwładnością po puszczeniu |
-| obrót | przekręcenie dwoma palcami (zaczyna się po ~10°, żeby zwykłe szczypanie nie obracało); blisko pionu (< 6°) płótno samo się prostuje; przycisk z kątem na pasku – wyprostuj |
-| gumka | narzędzie „Gumka” na pasku albo gumka na końcu rysika – ściera dokładnie ślad gumki (okrągły, wektorowy, ostry przy każdym zoomie); kreski dorysowane później nie są ścierane |
-| narzędzie **Przesuń** (pasek, obok kolorów) | jeden palec / rysik przesuwa płótno i nic nie rysuje; dwa stuknięcia + przeciągnięcie w dół/górę = zoom (jak w Mapach) – wygodne do pokazywania i nagrywania |
-| narzędzie **Zaznacz** (pasek, obok kolorów) | obrysuj kreski palcem (lasso); przeciągnij ramkę – przesunięcie, uchwyt w prawym dolnym rogu – zmiana rozmiaru; pasek na dole: Usuń / Duplikuj / Kolor (aktualny) / Gotowe; każda zmiana to jedno „Cofnij” |
-| narzędzie **Tekst** | stuknij w płótno, wpisz tekst (kilka linii), ustaw rozmiar → litery jako wektorowe kształty w aktualnym kolorze (ostre przy każdym zoomie; zaznaczanie, gumka, cofanie działają jak na kreskach) |
-| narzędzie **Wygnij** | przeciągnij po kreskach – punkty w kółku pod palcem przesuwają się z płynnym słabnięciem ku brzegowi (zasięg – suwak); działa na każdy pędzel, kształty, tekst; jedno „Cofnij” na przeciągnięcie |
-| narzędzie **Miarka** | przeciągnij – długość na płótnie (w pt przy 100 %, przy ogromnych skalach w potęgach dziesięciu) i kąt; z siatką końce się przyciągają |
-| palm rejection | po pierwszym użyciu rysika palce już nie rysują – jeden palec przesuwa płótno |
-| menu ☰ i szybkie przyciski | całe menu chowa się pod przyciskiem ☰ (trzy paski) w lewym górnym rogu – stuknięcie otwiera je pod spodem, ✕ zamyka; podczas rysowania otwarte menu samo się zwija (wyłączysz w Więcej → „Chowaj menu podczas rysowania”); obok ☰ jest 5 kwadracików – szybkich przycisków, każdy wybierasz w Więcej → „Szybkie przyciski…” (Pióro, Gumka, Przesuń – ikona palca, Zaznacz, Tekst, Miarka, Cofnij, Ponów, Początek, Siatka, Kolor, Zdjęcia, Warstwy albo puste) |
+| draw | stylus or one finger |
+| pan + zoom | two fingers (pinch around the centre of the gesture), with inertia after letting go |
+| rotate | twist with two fingers (starts after ~10°, so an ordinary pinch doesn't rotate); close to upright (< 6°) the canvas straightens itself; the angle button on the toolbar – straighten |
+| eraser | the “Eraser” tool on the toolbar or the eraser end of a stylus – erases exactly the eraser trail (round, vector, sharp at every zoom); strokes drawn later are not erased |
+| **Move** tool (toolbar, next to the colours) | one finger / stylus pans the canvas and draws nothing; double tap + drag down/up = zoom (like in Maps) – handy for showing and recording |
+| **Select** tool (toolbar, next to the colours) | circle strokes with a finger (lasso); drag the frame – move, handle in the bottom-right corner – resize; bottom bar: Delete / Duplicate / Colour (current) / Done; every change is one “Undo” |
+| **Text** tool | tap the canvas, type text (several lines), set the size → letters as vector shapes in the current colour (sharp at every zoom; selecting, erasing and undo work as with strokes) |
+| **Bend** tool | drag over strokes – points in the circle under your finger move with a smooth falloff towards the edge (radius – slider); works on every brush, shapes and text; one “Undo” per drag |
+| **Ruler** tool | drag – length on the canvas (in pt at 100 %, in powers of ten at huge scales) and angle; with the grid on, the ends snap |
+| palm rejection | after the stylus is used for the first time, fingers no longer draw – one finger pans the canvas |
+| ☰ menu and quick buttons | the whole menu hides under the ☰ (three lines) button in the top-left corner – tapping it opens the menu below, ✕ closes it; while drawing an open menu folds away by itself (turn off in More → “Hide the menu while drawing”); next to ☰ there are 5 squares – quick buttons, each chosen in More → “Quick buttons…” (Pen, Eraser, Move – finger icon, Select, Text, Ruler, Undo, Redo, Home, Grid, Colour, Photos, Layers or empty) |
 
-Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy dołoży się drugi palec
-(start szczypania).
+A stroke started with a finger is cancelled if a second finger is added within a quarter of a
+second (the start of a pinch).
 
-## Języki i pierwsze uruchomienie
+## Languages and first launch
 
-Przy pierwszym uruchomieniu ekran powitalny pyta o **język** (polski, angielski, niemiecki,
-rosyjski, ukraiński, hiszpański, francuski, włoski; wstępnie zaznaczony język telefonu / systemu)
-i **urządzenie**: *Telefon* (obecny układ) albo *Tablet* (przyciski i tekst o 25 % większe).
-Wybór trafia do `settings.txt` w folderze danych; zmienia się go w **Więcej → Ustawienia…** albo
-przyciskiem **Ustawienia…** w galerii projektów. Tłumaczenia są w `crates/app/src/i18n.rs`
-(polski tekst jest kluczem, brakujące tłumaczenie → polski).
+On first launch a welcome screen asks for the **language** (Polish, English, German, Russian,
+Ukrainian, Spanish, French, Italian; the phone / system language is preselected) and the
+**device**: *Phone* (the current layout) or *Tablet* (buttons and text 25 % larger).
+The choice goes to `settings.txt` in the data folder; change it in **More → Settings…** or with the
+**Settings…** button in the project gallery. Translations are in `crates/app/src/i18n.rs`
+(the Polish text is the key, a missing translation → Polish).
 
-Po obróceniu ekranu płótno od razu dopasowuje się do nowego kształtu (środek i skala zostają),
-działają wszystkie cztery orientacje z poszanowaniem blokady obrotu.
+After rotating the screen the canvas adapts to the new shape right away (the centre and scale stay),
+all four orientations work and the rotation lock is respected.
 
-## Projekty
+## Projects
 
-Aplikacja startuje od **galerii projektów**: kafelki z miniaturką, nazwą i datą zmiany oraz kafelek
-„+ Nowa kartka”. Stuknięcie w kafelek otwiera projekt; przycisk **Projekty** na pasku (albo
-„Wstecz” na Androidzie) zapisuje go, odświeża miniaturkę i wraca do galerii. Przycisk „•••” pod
-kafelkiem: zmiana nazwy, duplikowanie, usuwanie (z potwierdzeniem).
+The app starts with the **project gallery**: tiles with a thumbnail, name and modification date,
+plus a “+ New page” tile. Tapping a tile opens the project; the **Projects** button on the toolbar
+(or “Back” on Android) saves it, refreshes the thumbnail and returns to the gallery. The “•••”
+button under a tile: rename, duplicate, delete (with confirmation).
 
-Każdy projekt to plik `Nazwa.icnv` + miniaturka `Nazwa.png` w folderze `projects/`
-(desktop: `~/.local/share/infinite-canvas/`, Android: pamięć wewnętrzna aplikacji). Miniaturka
-jest renderowana z wektorów przy wyjściu z projektu i co ~20 s podczas rysowania.
+Each project is a `Name.icnv` file + a `Name.png` thumbnail in the `projects/` folder
+(desktop: `~/.local/share/infinite-canvas/`, Android: the app's internal storage). The thumbnail
+is rendered from the vectors when leaving the project and every ~20 s while drawing.
 
-## Zapis
+## Saving
 
-Rysunek zapisuje się automatycznie ~1,5 s po każdej zmianie oraz przy wyjściu/wstrzymaniu
-aplikacji. Format binarny: nagłówek `ICNV`, numer wersji (u16, obecnie 8; starsze wersje nadal się
-wczytują), dane w `postcard`. Zapis jest
-atomowy (plik tymczasowy + rename). Uszkodzony plik nie jest nadpisywany – zostaje przemianowany
-na `*.broken`.
+The drawing saves automatically ~1.5 s after every change and when the app is closed/paused.
+Binary format: an `ICNV` header, a version number (u16, currently 8; older versions still load),
+data in `postcard`. Saving is atomic (temporary file + rename). A damaged file is not overwritten –
+it is renamed to `*.broken`.
 
-## Testy
+## Tests
 
 ```bash
-cargo test                      # w tym testy renderowania offscreen na GPU
+cargo test                      # including offscreen GPU rendering tests
 cargo clippy --all-targets
-cargo test --release -p infinite_canvas --test render_offscreen -- --ignored --nocapture   # wydajność 10k kresek
+cargo test --release -p infinite_canvas --test render_offscreen -- --ignored --nocapture   # 10k-stroke performance
 ```
 
-Testy obejmują m.in. zejście kamerą na 2^±300 i powrót, rysowanie na głębokości ~10^90 i
-sprawdzenie pikseli, przesunięcia o 0,5 px bez drgań, dokładność krawędzi przy powiększeniu 2^20,
-zapis/odczyt ogromnych współrzędnych, gumkę i cofanie.
+The tests cover, among other things, moving the camera down to 2^±300 and back, drawing at a depth
+of ~10^90 and checking pixels, 0.5 px moves without jitter, edge accuracy at 2^20 magnification,
+saving/loading huge coordinates, the eraser and undo.
 
-## Licencja
+## License
 
-MIT OR Apache-2.0. Projekty w `ref/` (afnopadd, InfiniPaint – oba GPL-3.0) służyły wyłącznie
-jako inspiracja; ich kod nie jest używany ani kopiowany.
+MIT OR Apache-2.0. The projects in `ref/` (afnopadd, InfiniPaint – both GPL-3.0) served only as
+inspiration; their code is neither used nor copied.
