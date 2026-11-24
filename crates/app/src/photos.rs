@@ -75,7 +75,7 @@ pub trait PhotoBackend: Send {
 }
 
 /// Folder name for exported pictures.
-pub const EXPORT_FOLDER: &str = "Nieskończone płótno";
+pub const EXPORT_FOLDER: &str = "InfinityCanvas";
 
 enum Request {
     Save(String, RgbaImage),

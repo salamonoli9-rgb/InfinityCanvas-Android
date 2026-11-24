@@ -1,4 +1,4 @@
-# Nieskończone płótno
+# InfinityCanvas Android
 
 Aplikacja do rysowania z nieskończonym płótnem i nieograniczonym przybliżaniem/oddalaniem
 (w duchu Endless Paper). Kreski są wektorami renderowanymi na nowo w każdej klatce, więc
@@ -72,7 +72,7 @@ cargo run --release -- inny.icnv    # otwiera jeden konkretny plik
 ./build_android.sh              # release, instaluje i uruchamia
 ./build_android.sh --debug      # szybsza kompilacja
 ./build_android.sh --no-install # tylko target/android/infinite-canvas.apk
-./build_android.sh --to-files   # dodatkowo kopia APK w telefonie: Pobrane/Nieskonczone-plotno.apk
+./build_android.sh --to-files   # dodatkowo kopia APK w telefonie: Pobrane/InfinityCanvas-Android.apk
 ```
 
 Logi aplikacji: `~/Android/Sdk/platform-tools/adb logcat -s infinite_canvas:V`
@@ -146,8 +146,8 @@ przerywa lot. Zakładki zapisują się w projekcie.
 
 **Wideo MP4** (w oknie Zakładki, od 2 zakładek): film z przelotem przez zakładki po kolei (postój
 na każdej, płynny lot między nimi), 768 px szerokości, 30 kl./s, proporcje ekranu. Na telefonie
-kodowany sprzętowo (MediaCodec H.264) i zapisywany w galerii (Filmy → „Nieskończone płótno”), na
-komputerze przez `ffmpeg` do `~/Wideo/Nieskończone płótno/`. Postęp widać na dole; „Wstecz” anuluje.
+kodowany sprzętowo (MediaCodec H.264) i zapisywany w galerii (Filmy → „InfinityCanvas”), na
+komputerze przez `ffmpeg` do `~/Wideo/InfinityCanvas/`. Postęp widać na dole; „Wstecz” anuluje.
 
 ### Nagrywanie
 
@@ -165,8 +165,8 @@ ma w eksportach.
 ### Eksport
 
 **Więcej → Eksport do PNG** zapisuje to, co widać na ekranie (bez paska narzędzi), jako PNG w podwójnej
-rozdzielczości ekranu: na telefonie w galerii (Obrazy → „Nieskończone płótno”), na komputerze w
-`~/Obrazy/Nieskończone płótno/`.
+rozdzielczości ekranu: na telefonie w galerii (Obrazy → „InfinityCanvas”), na komputerze w
+`~/Obrazy/InfinityCanvas/`.
 
 ### Gesty
 

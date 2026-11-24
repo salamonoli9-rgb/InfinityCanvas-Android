@@ -171,7 +171,7 @@ impl ApplicationHandler for Desktop {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("Nieskończone płótno")
+            .with_title("InfinityCanvas")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
         let window = Arc::new(el.create_window(attrs).expect("cannot create window"));
         let size = window.inner_size();
