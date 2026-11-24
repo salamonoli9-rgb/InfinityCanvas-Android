@@ -45,6 +45,10 @@ pub struct ToolState {
     /// Eraser diameter in logical points.
     pub eraser: f32,
     pub palette: Vec<Color32>,
+    /// Toolbar folded open (false = only a small tab at the top; tap it to slide the bar out).
+    pub bar_open: bool,
+    /// Slide the toolbar away while a stroke is being drawn (it comes back when the finger lifts).
+    pub bar_autohide: bool,
 }
 
 impl ToolState {
@@ -98,6 +102,8 @@ impl Default for ToolState {
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
             eraser: 24.0,
+            bar_open: true,
+            bar_autohide: true,
             palette: vec![
                 Color32::from_rgb(0x1d, 0x1d, 0x1f),
                 Color32::from_rgb(0x8e, 0x8e, 0x93),
@@ -122,6 +128,8 @@ pub struct Info {
     pub strokes: usize,
     /// Screen edges covered by system bars / cutouts on the left and right (points).
     pub safe_side: [f32; 2],
+    /// A stroke is being drawn right now (the toolbar can slide out of the way).
+    pub drawing: bool,
 }
 
 #[derive(Default, Debug)]
@@ -265,6 +273,7 @@ fn photos_button(ui: &mut egui::Ui, a: &mut Actions, s: &mut ToolState) {
         if ui.checkbox(&mut s.show_grid, t("Siatka (kształty się przyciągają)")).changed() {
             a.grid_changed = true;
         }
+        ui.checkbox(&mut s.bar_autohide, t("Chowaj pasek podczas rysowania"));
         if ui.button(t("Zdjęcia…")).clicked() {
             a.photos = true;
             ui.close();
@@ -309,6 +318,44 @@ fn zoom_label(ui: &mut egui::Ui, info: &Info) {
         .on_hover_text(tf("log2 zoomu: {}\nkresek: {}", &[&format!("{:.2}", info.log_zoom), &info.strokes]));
 }
 
+/// Small button with a drawn chevron (no font glyph needed): up = fold the bar, down = unfold.
+fn chevron_button(ui: &mut egui::Ui, up: bool) -> egui::Response {
+    let side = ui.spacing().interact_size.y;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(side * 0.9, side), Sense::click());
+    let v = ui.style().interact(&resp);
+    ui.painter().rect_filled(rect, CornerRadius::same(6), v.weak_bg_fill);
+    let c = rect.center();
+    let (w, h) = (side * 0.18, side * 0.1);
+    let dir = if up { -1.0 } else { 1.0 };
+    let pts = vec![egui::pos2(c.x - w, c.y - h * dir), egui::pos2(c.x, c.y + h * dir), egui::pos2(c.x + w, c.y - h * dir)];
+    ui.painter().add(egui::Shape::line(pts, Stroke::new(2.0, v.fg_stroke.color)));
+    resp
+}
+
+/// The folded toolbar: a small tab with the current colour and brush; a tap slides the bar out.
+fn bar_tab(ctx: &egui::Context, s: &mut ToolState, anchor: Align2, offset: [f32; 2], slide: f32) -> Rect {
+    let frame = egui::Frame::popup(&ctx.global_style()).corner_radius(CornerRadius::same(12));
+    let r = egui::Area::new(egui::Id::unique("toolbar-tab")).anchor(anchor, [offset[0], offset[1] - slide]).show(ctx, |ui| {
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let mut open = chevron_button(ui, false).on_hover_text(t("Pokaż pasek narzędzi")).clicked();
+                let size = ui.spacing().interact_size.y;
+                let (dot, resp) = ui.allocate_exact_size(Vec2::splat(size * 0.8), Sense::click());
+                let color = if s.tool == Tool::Eraser { Color32::from_gray(200) } else { s.color };
+                ui.painter().circle_filled(dot.center(), size * 0.3, color);
+                ui.painter().circle_stroke(dot.center(), size * 0.3, Stroke::new(1.0, Color32::from_gray(120)));
+                open |= resp.clicked();
+                let name = if s.tool == Tool::Eraser { t("Gumka") } else { s.shape.map_or(short_name(s.brush), |sh| t(sh.name())) };
+                open |= ui.add(egui::Label::new(name).sense(Sense::click())).clicked();
+                if open {
+                    s.bar_open = true;
+                }
+            });
+        });
+    });
+    r.response.rect
+}
+
 pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f32) -> (Actions, Vec<Rect>) {
     let mut a = Actions::default();
     let mut rects = Vec::new();
@@ -343,12 +390,34 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
     let compact = inner_w < 760.0;
     let anchor = if compact { Align2::LEFT_TOP } else { Align2::CENTER_TOP };
     let offset = if compact { [8.0 + left, 8.0 + safe_top] } else { [(left - right) * 0.5, 8.0 + safe_top] };
-    let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(anchor, offset).show(ctx, |ui| {
+    // Sliding: the bar folds up into a small tab (button), and also slides away while drawing.
+    let hidden_by_drawing = s.bar_autohide && info.drawing;
+    let shown = ctx.animate_bool_with_time(egui::Id::unique("toolbar-shown"), s.bar_open && !hidden_by_drawing, 0.18);
+    let tab_shown = ctx.animate_bool_with_time(egui::Id::unique("toolbar-tab-shown"), !s.bar_open && !hidden_by_drawing, 0.18);
+    let h_id = egui::Id::unique("toolbar-height");
+    let bar_h = ctx.data(|d| d.get_temp::<f32>(h_id)).unwrap_or(140.0);
+    if tab_shown > 0.001 {
+        let tab = bar_tab(ctx, s, anchor, offset, (60.0 + offset[1]) * (1.0 - tab_shown));
+        if tab_shown > 0.5 {
+            rects.push(tab);
+        }
+    }
+    if shown <= 0.001 {
+        if egui::Popup::is_any_open(ctx) {
+            rects.push(Rect::EVERYTHING);
+        }
+        return (a, rects);
+    }
+    let slide = (bar_h + offset[1] + 8.0) * (1.0 - shown);
+    let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(anchor, [offset[0], offset[1] - slide]).show(ctx, |ui| {
         frame.show(ui, |ui| {
             ui.set_max_width(inner_w);
             // Rows wrap when a language's words are long (German, Russian…).
             if compact {
                 ui.horizontal_wrapped(|ui| {
+                    if chevron_button(ui, true).on_hover_text(t("Schowaj pasek narzędzi")).clicked() {
+                        s.bar_open = false;
+                    }
                     menu_button(ui, &mut a);
                     tool_buttons(ui, s);
                     history_buttons(ui, info, &mut a);
@@ -368,6 +437,9 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                 });
             } else {
                 ui.horizontal_wrapped(|ui| {
+                    if chevron_button(ui, true).on_hover_text(t("Schowaj pasek narzędzi")).clicked() {
+                        s.bar_open = false;
+                    }
                     menu_button(ui, &mut a);
                     ui.separator();
                     tool_buttons(ui, s);
@@ -387,6 +459,9 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
             }
         });
     });
+    if shown >= 0.999 {
+        ctx.data_mut(|d| d.insert_temp(h_id, resp.response.rect.height()));
+    }
     rects.push(resp.response.rect);
     // Popups (colour picker) also block the canvas.
     if egui::Popup::is_any_open(ctx) || ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input() {
@@ -1207,7 +1282,7 @@ mod layout_tests {
             st.spacing.button_padding = egui::vec2(8.0, 6.0);
             st.spacing.slider_width = 120.0;
         });
-        let info = Info { can_undo: true, can_redo: false, log_zoom: -33.4, rotation: -2.5, strokes: 2, safe_side: [0.0, 0.0] };
+        let info = Info { can_undo: true, can_redo: false, log_zoom: -33.4, rotation: -2.5, strokes: 2, safe_side: [0.0, 0.0], drawing: false };
         let mut rect = Rect::NOTHING;
         let shapes = [None, Some(Shape::Line), Some(Shape::Rectangle), Some(Shape::Ellipse)];
         for (brush, shape) in Brush::ALL.iter().flat_map(|b| shapes.iter().map(move |sh| (*b, *sh))) {
@@ -1241,6 +1316,42 @@ mod layout_tests {
             out.textures_delta.clear();
         }
         assert!(bar.min.x >= 0.0 && bar.max.x <= 360.0 && bar.max.y <= 800.0, "{bar:?}");
+    }
+
+    /// The toolbar folds into a small tab, and slides away while a stroke is drawn.
+    #[test]
+    fn toolbar_folds_and_hides_while_drawing() {
+        let ctx = egui::Context::default();
+        let mut s = ToolState::default();
+        let mut info = Info { can_undo: true, can_redo: false, log_zoom: 0.0, rotation: 0.0, strokes: 0, safe_side: [0.0, 0.0], drawing: false };
+        let mut time = 0.0;
+        let mut frames = |s: &mut ToolState, info: &Info| {
+            let mut rects = Vec::new();
+            for _ in 0..12 {
+                time += 0.05;
+                let raw = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),
+                    time: Some(time),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(raw, |ui| rects = toolbar(ui.ctx(), s, info, 24.0).1);
+                out.textures_delta.clear();
+            }
+            rects
+        };
+        let open = frames(&mut s, &info);
+        assert!(open[0].min.y >= 24.0 && open[0].height() > 60.0, "{open:?}");
+        s.bar_open = false;
+        let folded = frames(&mut s, &info);
+        assert_eq!(folded.len(), 1, "{folded:?}");
+        assert!(folded[0].min.y >= 24.0 && folded[0].height() < 60.0 && folded[0].width() < 220.0, "tab: {folded:?}");
+        s.bar_open = true;
+        info.drawing = true;
+        let drawing = frames(&mut s, &info);
+        assert!(drawing.iter().all(|r| r.max.y <= 0.0), "while drawing: {drawing:?}");
+        info.drawing = false;
+        let back = frames(&mut s, &info);
+        assert!(back[0].min.y >= 24.0 && back[0].height() > 60.0, "{back:?}");
     }
 
     /// Dragging over clickable cells scrolls the list (touch screens send mouse-like events)

@@ -2155,6 +2155,7 @@ impl CanvasApp {
             rotation: self.camera.rotation,
             strokes: self.doc.len(),
             safe_side: self.safe_side,
+            drawing: self.gestures.is_drawing(),
         };
         let mut actions = ui::Actions::default();
         let mut gallery_actions = Vec::new();

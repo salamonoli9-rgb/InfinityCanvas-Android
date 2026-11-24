@@ -184,6 +184,7 @@ rozdzielczości ekranu: na telefonie w galerii (Obrazy → „InfinityCanvas”)
 | narzędzie **Wygnij** | przeciągnij po kreskach – punkty w kółku pod palcem przesuwają się z płynnym słabnięciem ku brzegowi (zasięg – suwak); działa na każdy pędzel, kształty, tekst; jedno „Cofnij” na przeciągnięcie |
 | narzędzie **Miarka** | przeciągnij – długość na płótnie (w pt przy 100 %, przy ogromnych skalach w potęgach dziesięciu) i kąt; z siatką końce się przyciągają |
 | palm rejection | po pierwszym użyciu rysika palce już nie rysują – jeden palec przesuwa płótno |
+| wysuwany pasek narzędzi | strzałka ⌃ na początku paska chowa go do małej zakładki u góry (kolor + pędzel), stuknięcie w zakładkę wysuwa go z powrotem; podczas rysowania pasek sam odjeżdża w górę i wraca po oderwaniu palca (wyłączysz w Więcej → „Chowaj pasek podczas rysowania”) |
 
 Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy dołoży się drugi palec
 (start szczypania).

@@ -31,7 +31,7 @@ fn run(ctx: &egui::Context, w: f32, mut f: impl FnMut(&egui::Context)) {
 
 #[test]
 fn every_language_fits() {
-    let info = Info { can_undo: true, can_redo: true, log_zoom: -33.4, rotation: -2.5, strokes: 2, safe_side: [0.0, 0.0] };
+    let info = Info { can_undo: true, can_redo: true, log_zoom: -33.4, rotation: -2.5, strokes: 2, safe_side: [0.0, 0.0], drawing: false };
     for (device, w) in [(Device::Phone, 360.0), (Device::Tablet, 600.0)] {
         for lang in Lang::ALL {
             i18n::set(lang);
