@@ -1,5 +1,7 @@
 # InfinityCanvas Android
 
+**Gotowa aplikacja:** [`apk/InfinityCanvas-Android.apk`](apk/InfinityCanvas-Android.apk) — pobierz na telefon z Androidem (8.0+, ARM64) i zainstaluj (trzeba zezwolić na instalację z nieznanych źródeł).
+
 Aplikacja do rysowania z nieskończonym płótnem i nieograniczonym przybliżaniem/oddalaniem
 (w duchu Endless Paper). Kreski są wektorami renderowanymi na nowo w każdej klatce, więc
 nigdy się nie rozpikselują. Ten sam kod działa na Androidzie i na desktopie Linux.
