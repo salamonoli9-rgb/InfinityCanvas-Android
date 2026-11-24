@@ -3,12 +3,14 @@
 
 pub mod app;
 pub mod gestures;
+pub mod i18n;
 pub mod measure;
 pub mod grid;
 pub mod photos;
 pub mod projects;
 pub mod render;
 pub mod selection;
+pub mod settings;
 pub mod shapes;
 pub mod text;
 pub mod ui;

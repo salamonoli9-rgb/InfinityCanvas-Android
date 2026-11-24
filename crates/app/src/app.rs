@@ -12,6 +12,8 @@ use canvas_core::smoothing::PointerSmoother;
 use canvas_core::stroke::{Brush, Stroke, StrokePoint};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use crate::i18n::{t, tf};
+use crate::settings::Settings;
 use crate::photos::{PhotoBackend, PhotoLibrary};
 use crate::projects::Projects;
 use canvas_core::image::{ImageId, RefImage};
@@ -142,6 +144,12 @@ pub struct CanvasApp {
     recording: Option<Recording>,
     recording_saving: Option<crate::video::VideoJob>,
     text_panel: ui::TextPanel,
+    /// Language and phone / tablet (`None` before the first-start choice).
+    settings: Option<Settings>,
+    /// Where the settings are saved.
+    settings_dir: Option<PathBuf>,
+    /// The settings window is open with this choice (on the first start: the welcome).
+    settings_draft: Option<Settings>,
     /// Measured line (exact canvas points), shown until the next one or another tool.
     measure: Option<(canvas_core::coords::WorldPos, canvas_core::coords::WorldPos)>,
     measuring: bool,
@@ -422,6 +430,9 @@ impl CanvasApp {
             urgent: Vec::new(),
             content_rev: 0,
             text_panel: ui::TextPanel::default(),
+            settings: None,
+            settings_dir: None,
+            settings_draft: None,
             measure: None,
             measuring: false,
             nudge: None,
@@ -470,7 +481,7 @@ impl CanvasApp {
                 let p = path.as_ref().expect("some");
                 log::error!("could not load {}: {e}", p.display());
                 let _ = std::fs::rename(p, p.with_extension("broken"));
-                self.gallery.message = Some(format!("Plik był uszkodzony: {e}"));
+                self.gallery.message = Some(tf("Plik był uszkodzony: {}", &[&e]));
                 (Document::new(), Camera::default())
             }
         };
@@ -584,7 +595,7 @@ impl CanvasApp {
             New => {
                 let name = projects.new_name();
                 if let Err(e) = io::save_file(&projects.path_for(&name), &Document::new(), &Camera::default()) {
-                    self.gallery.message = Some(format!("Nie udało się utworzyć kartki: {e}"));
+                    self.gallery.message = Some(tf("Nie udało się utworzyć kartki: {}", &[&e]));
                 } else {
                     self.open_project(name);
                 }
@@ -594,36 +605,95 @@ impl CanvasApp {
                 Ok(name) => {
                     self.gallery.thumbs.remove(&from);
                     self.gallery.options = None;
-                    self.gallery.message = Some(format!("Zmieniono nazwę na „{name}”"));
+                    self.gallery.message = Some(tf("Zmieniono nazwę na „{}”", &[&name]));
                 }
                 Err(e) => self.gallery.message = Some(e),
             },
             Duplicate(name) => {
                 self.gallery.options = None;
                 self.gallery.message = Some(match projects.duplicate(&name) {
-                    Ok(copy) => format!("Utworzono kopię „{copy}”"),
-                    Err(e) => format!("Nie udało się skopiować: {e}"),
+                    Ok(copy) => tf("Utworzono kopię „{}”", &[&copy]),
+                    Err(e) => tf("Nie udało się skopiować: {}", &[&e]),
                 });
             }
             Delete(name) => {
                 self.gallery.options = None;
                 self.gallery.thumbs.remove(&name);
                 self.gallery.message = Some(match projects.delete(&name) {
-                    Ok(()) => format!("Usunięto „{name}”"),
-                    Err(e) => format!("Nie udało się usunąć: {e}"),
+                    Ok(()) => tf("Usunięto „{}”", &[&name]),
+                    Err(e) => tf("Nie udało się usunąć: {}", &[&e]),
                 });
             }
+            Settings => self.open_settings(),
         }
         self.refresh_gallery();
+    }
+
+    /// Reads the settings saved in `dir`; without them (first start) the welcome screen asks
+    /// for the language (preselected: `guess`) and phone / tablet.
+    pub fn load_settings(&mut self, dir: &Path, guess: crate::i18n::Lang) {
+        self.settings_dir = Some(dir.to_path_buf());
+        match Settings::load(dir) {
+            Some(s) => self.apply_settings(s),
+            None => {
+                let d = Settings { lang: guess, device: crate::settings::Device::Phone };
+                crate::i18n::set(d.lang);
+                self.settings_draft = Some(d);
+            }
+        }
+        self.wants_redraw = true;
+    }
+
+    pub fn settings(&self) -> Option<Settings> {
+        self.settings
+    }
+
+    fn open_settings(&mut self) {
+        self.settings_draft = Some(self.settings.unwrap_or(Settings { lang: crate::i18n::current(), device: crate::settings::Device::Phone }));
+    }
+
+    fn apply_settings(&mut self, s: Settings) {
+        crate::i18n::set(s.lang);
+        self.settings = Some(s);
+        // Brush previews are labelled; the gallery shows times in words.
+        self.apply_style();
+        self.cache = None;
+        self.wants_redraw = true;
+    }
+
+    fn settings_action(&mut self, a: ui::SettingsAction) {
+        let Some(d) = self.settings_draft.take() else { return };
+        match a {
+            ui::SettingsAction::Save => {
+                if let Some(dir) = &self.settings_dir {
+                    d.save(dir);
+                }
+                self.apply_settings(d);
+            }
+            ui::SettingsAction::Cancel => {
+                if let Some(s) = self.settings {
+                    crate::i18n::set(s.lang);
+                }
+            }
+        }
+    }
+
+    /// Interface size: bigger on a tablet.
+    fn ui_scale(&self) -> f32 {
+        self.settings.map_or(1.0, |s| s.device.ui_scale())
     }
 
     /// System "back": from a project to the gallery, or closes a dialog.
     /// Returns whether it was handled (otherwise the app may close).
     pub fn back(&mut self) -> bool {
         self.wants_redraw = true;
+        if self.settings_draft.is_some() && self.settings.is_some() {
+            self.settings_action(ui::SettingsAction::Cancel);
+            return true;
+        }
         if self.video.take().is_some() {
             // Dropping the job closes the encoder without finishing the file properly.
-            self.toast = Some(("Eksport wideo anulowany".into(), Instant::now()));
+            self.toast = Some((t("Eksport wideo anulowany").into(), Instant::now()));
             return true;
         }
         if self.image_edit.is_some() {
@@ -683,14 +753,28 @@ impl CanvasApp {
 
     fn apply_style(&self) {
         self.egui_ctx.set_theme(egui::Theme::Light);
-        if cfg!(target_os = "android") {
-            self.egui_ctx.all_styles_mut(|st| {
-                st.spacing.interact_size = egui::vec2(40.0, 34.0);
-                st.spacing.item_spacing = egui::vec2(8.0, 6.0);
-                st.spacing.button_padding = egui::vec2(8.0, 6.0);
-                st.spacing.slider_width = 120.0;
-            });
-        }
+        let k = self.ui_scale();
+        let touch = cfg!(target_os = "android");
+        self.egui_ctx.all_styles_mut(|st| {
+            // From the defaults each time, so changing phone ↔ tablet doesn't compound.
+            let d = egui::Style::default();
+            st.text_styles = d.text_styles.iter().map(|(name, f)| (name.clone(), egui::FontId::new(f.size * k, f.family.clone()))).collect();
+            st.spacing = d.spacing.clone();
+            let sp = &mut st.spacing;
+            if touch {
+                sp.interact_size = egui::vec2(40.0, 34.0);
+                sp.item_spacing = egui::vec2(8.0, 6.0);
+                sp.button_padding = egui::vec2(8.0, 6.0);
+                sp.slider_width = 120.0;
+            }
+            sp.interact_size *= k;
+            sp.item_spacing *= k;
+            sp.button_padding *= k;
+            sp.slider_width *= k;
+            sp.icon_width *= k;
+            sp.icon_width_inner *= k;
+            sp.icon_spacing *= k;
+        });
     }
 
     /// The window changed size (e.g. the screen was rotated). The camera keeps the same
@@ -742,7 +826,7 @@ impl CanvasApp {
 
     /// Adds a photo (file bytes) centred on the screen and starts moving it.
     pub fn add_photo(&mut self, bytes: &[u8]) -> Result<ImageId, String> {
-        let p = crate::photos::prepare(bytes).ok_or("Nie udało się odczytać zdjęcia")?;
+        let p = crate::photos::prepare(bytes).ok_or(t("Nie udało się odczytać zdjęcia"))?;
         let pixels = [p.rgba.width(), p.rgba.height()];
         let img = RefImage::place(self.doc.alloc_id(), &self.camera, self.viewport, pixels, Arc::new(p.encoded), 0.8);
         let id = img.id;
@@ -769,7 +853,7 @@ impl CanvasApp {
     /// colour patches as filled shapes (if `opts.colored`) and/or outlines drawn with the
     /// current brush, colour and width. One undo step (plus one for the photo, if kept).
     pub fn photo_to_drawing(&mut self, bytes: &[u8], opts: DrawingOptions) -> Result<usize, String> {
-        let img = crate::photos::decode(bytes).ok_or("Nie udało się odczytać zdjęcia")?;
+        let img = crate::photos::decode(bytes).ok_or(t("Nie udało się odczytać zdjęcia"))?;
         let detail = opts.detail.clamp(0.0, 1.0);
         let vp = self.viewport;
         let level = self.camera.level();
@@ -830,7 +914,7 @@ impl CanvasApp {
             }
         }
         if strokes.is_empty() {
-            return Err("Nic nie wyszło – spróbuj więcej szczegółów".into());
+            return Err(t("Nic nie wyszło – spróbuj więcej szczegółów").into());
         }
         if opts.keep_photo {
             let id = self.add_photo(bytes)?;
@@ -850,8 +934,9 @@ impl CanvasApp {
         match a {
             ui::BookmarkAction::Add => {
                 let n = self.doc.bookmarks.len() + 1;
-                self.doc.bookmarks.push(Bookmark { name: format!("Zakładka {n}"), camera: self.camera.clone() });
-                self.toast = Some((format!("Dodano „Zakładka {n}”"), Instant::now()));
+                let name = tf("Zakładka {}", &[&n]);
+                self.toast = Some((tf("Dodano „{}”", &[&name]), Instant::now()));
+                self.doc.bookmarks.push(Bookmark { name, camera: self.camera.clone() });
             }
             ui::BookmarkAction::ExportVideo => {
                 self.start_video();
@@ -886,7 +971,7 @@ impl CanvasApp {
         match a {
             Add => {
                 let n = self.doc.layers.len() + 1;
-                self.active_layer = self.doc.add_layer(format!("Warstwa {n}"));
+                self.active_layer = self.doc.add_layer(tf("Warstwa {}", &[&n]));
             }
             Select(id) => self.active_layer = id,
             ToggleVisible(id) => {
@@ -916,7 +1001,7 @@ impl CanvasApp {
             }
             Delete(id) => {
                 if self.doc.layers.len() <= 1 {
-                    self.toast = Some(("Musi zostać co najmniej jedna warstwa".into(), Instant::now()));
+                    self.toast = Some((t("Musi zostać co najmniej jedna warstwa").into(), Instant::now()));
                     return;
                 }
                 // Its strokes go through the undo history; the layer itself is just removed.
@@ -962,7 +1047,7 @@ impl CanvasApp {
                 Some(SelDrag::Lasso(pts)) => {
                     self.selection = lasso(&self.doc, &self.camera, self.viewport, &pts);
                     if self.selection.is_empty() && pts.len() > 3 {
-                        self.toast = Some(("Nic nie zaznaczono – obrysuj kreski".into(), Instant::now()));
+                        self.toast = Some((t("Nic nie zaznaczono – obrysuj kreski").into(), Instant::now()));
                     }
                 }
                 Some(d) => {
@@ -1166,11 +1251,11 @@ impl CanvasApp {
     /// Starts exporting a video of a flight through the bookmarks.
     pub fn start_video(&mut self) {
         let Some(factory) = self.video_factory.clone() else {
-            self.toast = Some(("Eksport wideo nie jest dostępny na tym urządzeniu".into(), Instant::now()));
+            self.toast = Some((t("Eksport wideo nie jest dostępny na tym urządzeniu").into(), Instant::now()));
             return;
         };
         if self.doc.bookmarks.len() < 2 {
-            self.toast = Some(("Dodaj co najmniej 2 zakładki".into(), Instant::now()));
+            self.toast = Some((t("Dodaj co najmniej 2 zakładki").into(), Instant::now()));
             return;
         }
         let size = crate::video::size_for(self.viewport);
@@ -1196,11 +1281,11 @@ impl CanvasApp {
             }
             rec.job.finish();
             self.recording_saving = Some(rec.job);
-            self.toast = Some(("Zapisywanie nagrania…".into(), Instant::now()));
+            self.toast = Some((t("Zapisywanie nagrania…").into(), Instant::now()));
             return;
         }
         let Some(factory) = self.video_factory.clone() else {
-            self.toast = Some(("Nagrywanie nie jest dostępne na tym urządzeniu".into(), Instant::now()));
+            self.toast = Some((t("Nagrywanie nie jest dostępne na tym urządzeniu").into(), Instant::now()));
             return;
         };
         let size = crate::video::size_for(self.viewport);
@@ -1227,8 +1312,8 @@ impl CanvasApp {
         if let Some(r) = v.job.poll() {
             self.toast = Some((
                 match r {
-                    Ok(place) => format!("Zapisano wideo: {place}"),
-                    Err(e) => format!("Wideo nie powstało: {e}"),
+                    Ok(place) => tf("Zapisano wideo: {}", &[&place]),
+                    Err(e) => tf("Wideo nie powstało: {}", &[&e]),
                 },
                 Instant::now(),
             ));
@@ -1278,7 +1363,7 @@ impl CanvasApp {
             }
         }
         let pct = (100 * v.next / v.cams.len().max(1)).min(100);
-        let msg = if v.finishing { "Zapisywanie wideo…".to_string() } else { format!("Eksport wideo: {pct}% (Wstecz – anuluj)") };
+        let msg = if v.finishing { t("Zapisywanie wideo…").to_string() } else { tf("Eksport wideo: {}% (Wstecz – anuluj)", &[&pct]) };
         self.toast = Some((msg, Instant::now()));
         self.video = Some(v);
         self.wants_redraw = true;
@@ -1319,7 +1404,7 @@ impl CanvasApp {
     /// library to be encoded and saved (phone gallery / Pictures folder).
     fn export_png(&mut self, target: Target, renderer: &mut Renderer) {
         if self.photo_lib.is_none() {
-            self.toast = Some(("Eksport nie jest dostępny na tym urządzeniu".into(), Instant::now()));
+            self.toast = Some((t("Eksport nie jest dostępny na tym urządzeniu").into(), Instant::now()));
             return;
         }
         let vp = self.viewport;
@@ -1358,7 +1443,7 @@ impl CanvasApp {
             },
         );
         let Some(img) = image::RgbaImage::from_raw(w, h, px) else {
-            self.toast = Some(("Nie udało się wyrenderować obrazu".into(), Instant::now()));
+            self.toast = Some((t("Nie udało się wyrenderować obrazu").into(), Instant::now()));
             return;
         };
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -1366,7 +1451,7 @@ impl CanvasApp {
         if let Some(lib) = self.photo_lib.as_mut() {
             lib.save_png(format!("{base}-{stamp}"), img);
         }
-        self.toast = Some(("Zapisywanie obrazu…".into(), Instant::now()));
+        self.toast = Some((t("Zapisywanie obrazu…").into(), Instant::now()));
     }
 
     /// Bucket fill: renders the current view offscreen, floods the enclosed area around the
@@ -1418,7 +1503,7 @@ impl CanvasApp {
             .collect();
         let seed = ((pos[0] * k) as usize, (pos[1] * k) as usize);
         let Some(loops) = canvas_core::posterize::fill_region(&ink, w as usize, h as usize, seed) else {
-            self.toast = Some(("Tu nie ma zamkniętego obszaru – obrysuj go albo przeciągnij, by narysować kształt".into(), Instant::now()));
+            self.toast = Some((t("Tu nie ma zamkniętego obszaru – obrysuj go albo przeciągnij, by narysować kształt").into(), Instant::now()));
             return;
         };
         let level = self.camera.level();
@@ -2055,8 +2140,8 @@ impl CanvasApp {
         if let Some(r) = self.photo_lib.as_mut().and_then(|l| l.saved.take()) {
             self.toast = Some((
                 match r {
-                    Ok(place) => format!("Zapisano: {place}"),
-                    Err(e) => format!("Nie zapisano: {e}"),
+                    Ok(place) => tf("Zapisano: {}", &[&place]),
+                    Err(e) => tf("Nie zapisano: {}", &[&crate::i18n::t_dyn(&e)]),
                 },
                 Instant::now(),
             ));
@@ -2080,11 +2165,18 @@ impl CanvasApp {
         let mut sel_action = None;
         let mut stop_recording = false;
         let mut text_action = None;
+        let mut settings_action = None;
         let mut toast_visible = false;
         let mut rects = Vec::new();
         let lib_busy = self.photo_lib.as_mut().is_some_and(|l| l.poll());
         let ctx = self.egui_ctx.clone();
         let output = ctx.run_ui(raw_input, |ui| {
+            if let Some(d) = &mut self.settings_draft {
+                settings_action = ui::settings_window(ui.ctx(), d, self.settings.is_none());
+                // Live preview of the language in the window itself.
+                crate::i18n::set(d.lang);
+                rects.push(egui::Rect::EVERYTHING);
+            }
             if self.screen == Screen::Gallery {
                 if let Some(projects) = &self.projects {
                     let bg = egui::Color32::from_rgb(
@@ -2243,6 +2335,12 @@ impl CanvasApp {
         for a in layer_actions {
             self.layer_action(a);
         }
+        if let Some(a) = settings_action {
+            self.settings_action(a);
+        }
+        if actions.settings {
+            self.open_settings();
+        }
         if actions.layers {
             self.layer_panel.open = !self.layer_panel.open;
             self.bookmark_panel.open = false;
@@ -2258,7 +2356,7 @@ impl CanvasApp {
                 let size = self.tools.text_size as f64 * self.pixels_per_point as f64;
                 self.text_panel.open = false;
                 if !self.add_text(&text, self.text_panel.pos, size) {
-                    self.toast = Some(("Nie udało się dodać tekstu".into(), Instant::now()));
+                    self.toast = Some((t("Nie udało się dodać tekstu").into(), Instant::now()));
                 }
             }
             Some(ui::TextAction::Cancel) => self.text_panel.open = false,
@@ -2276,8 +2374,8 @@ impl CanvasApp {
             self.recording_saving = None;
             self.toast = Some((
                 match r {
-                    Ok(place) => format!("Zapisano nagranie: {place}"),
-                    Err(e) => format!("Nagranie nie powstało: {e}"),
+                    Ok(place) => tf("Zapisano nagranie: {}", &[&place]),
+                    Err(e) => tf("Nagranie nie powstało: {}", &[&e]),
                 },
                 Instant::now(),
             ));
@@ -2299,7 +2397,7 @@ impl CanvasApp {
         if let Some((_, bytes)) = self.photo_lib.as_mut().and_then(|l| l.loaded.take()) {
             match bytes {
                 Some(b) => self.offer_photo(b),
-                None => self.photo_panel.message = Some("Nie udało się wczytać zdjęcia".into()),
+                None => self.photo_panel.message = Some(t("Nie udało się wczytać zdjęcia").into()),
             }
         }
         if std::mem::take(&mut self.clear_render_cache) {
@@ -2538,7 +2636,7 @@ impl CanvasApp {
                     }
                 }
                 if !rec.job.push(px.clone()) {
-                    self.toast = Some(("Nagrywanie przerwane: błąd kodera".into(), Instant::now()));
+                    self.toast = Some((t("Nagrywanie przerwane: błąd kodera").into(), Instant::now()));
                 }
                 rec.last = px;
                 rec.written = due;
@@ -2562,6 +2660,34 @@ mod tests {
     use super::*;
     use crate::gestures::{MouseButton, Phase};
     use crate::ui::GalleryAction;
+
+    #[test]
+    fn first_start_asks_then_remembers() {
+        use crate::i18n::Lang;
+        use crate::settings::Device;
+        let dir = std::env::temp_dir().join(format!("icnv-first-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = CanvasApp::with_projects(&dir);
+        // (Polish only: the language is process-wide and other tests check Polish names.)
+        app.load_settings(&dir, Lang::Pl);
+        assert!(app.settings_draft.is_some() && app.settings().is_none(), "welcome on the first start");
+        let normal = app.egui_ctx.global_style().spacing.interact_size;
+        app.settings_draft.as_mut().unwrap().device = Device::Tablet;
+        app.settings_action(ui::SettingsAction::Save);
+        assert_eq!(app.settings(), Some(Settings { lang: Lang::Pl, device: Device::Tablet }));
+        assert!(app.egui_ctx.global_style().spacing.interact_size.y > normal.y * 1.2, "bigger on a tablet");
+        // Next start: no welcome.
+        let mut again = CanvasApp::with_projects(&dir);
+        again.load_settings(&dir, Lang::En);
+        assert!(again.settings_draft.is_none());
+        assert_eq!(again.settings().map(|s| s.device), Some(Device::Tablet));
+        // Settings opened and cancelled change nothing; back closes them.
+        again.open_settings();
+        again.settings_draft.as_mut().unwrap().device = Device::Phone;
+        assert!(again.back());
+        assert_eq!(again.settings().map(|s| s.device), Some(Device::Tablet));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn draw(app: &mut CanvasApp, y: f64) {
         let ev = |phase, x: f64, t: f64| PointerEvent {

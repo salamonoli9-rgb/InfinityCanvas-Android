@@ -4,6 +4,7 @@ use crate::projects::{self, ProjectInfo, Projects};
 use crate::shapes::Shape;
 use canvas_core::stroke::Brush;
 use std::collections::HashMap;
+use crate::i18n::{t, tf};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, Vec2};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,23 +63,23 @@ impl ToolState {
 /// Short brush label for the toolbar (the menu shows full names).
 pub fn short_name(b: Brush) -> &'static str {
     match b {
-        Brush::Pen => "Pióro",
-        Brush::Fountain => "Wieczne",
-        Brush::Dynamic => "Dynamiczne",
-        Brush::Fixed => "Stałe",
-        Brush::SoftPencil => "Ołówek M",
-        Brush::HardPencil => "Ołówek T",
-        Brush::Marker => "Marker",
-        Brush::Dotted => "Kropki",
-        Brush::Fill => "Wypełnij",
-        Brush::Ballpoint => "Długopis",
-        Brush::Brush => "Pędzel",
-        Brush::Highlighter => "Zakreślacz",
-        Brush::Crayon => "Kredka",
-        Brush::Charcoal => "Węgiel",
-        Brush::Airbrush => "Aerograf",
-        Brush::Watercolor => "Akwarela",
-        Brush::Spray => "Spray",
+        Brush::Pen => t("Pióro"),
+        Brush::Fountain => t("Wieczne"),
+        Brush::Dynamic => t("Dynamiczne"),
+        Brush::Fixed => t("Stałe"),
+        Brush::SoftPencil => t("Ołówek M"),
+        Brush::HardPencil => t("Ołówek T"),
+        Brush::Marker => t("Marker"),
+        Brush::Dotted => t("Kropki"),
+        Brush::Fill => t("Wypełnij"),
+        Brush::Ballpoint => t("Długopis"),
+        Brush::Brush => t("Pędzel"),
+        Brush::Highlighter => t("Zakreślacz"),
+        Brush::Crayon => t("Kredka"),
+        Brush::Charcoal => t("Węgiel"),
+        Brush::Airbrush => t("Aerograf"),
+        Brush::Watercolor => t("Akwarela"),
+        Brush::Spray => t("Spray"),
     }
 }
 
@@ -143,6 +144,8 @@ pub struct Actions {
     pub record: bool,
     /// The grid was switched on or off.
     pub grid_changed: bool,
+    /// Open the settings (language, phone / tablet).
+    pub settings: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -172,7 +175,7 @@ fn swatch(ui: &mut egui::Ui, color: Color32, selected: bool) -> egui::Response {
 /// Draws the toolbar; returns actions and the screen rects (in points) the UI covers.
 /// Brush button (opens the list of brushes) and the eraser.
 fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
-    let label = s.shape.map_or(short_name(s.brush), Shape::name);
+    let label = s.shape.map_or(short_name(s.brush), |sh| t(sh.name()));
     let button = egui::Button::new(label).selected(s.tool == Tool::Pen);
     let r = egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
         ui.set_min_width(250.0);
@@ -182,8 +185,8 @@ fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
                 let selected = s.tool == Tool::Pen && s.brush == b;
                 let button = match s.previews.get(&b) {
                     // The sample of how the brush draws, then its name.
-                    Some(tex) => egui::Button::image_and_text(egui::Image::new((tex.id(), egui::vec2(96.0, 24.0))), b.name()),
-                    None => egui::Button::new(b.name()),
+                    Some(tex) => egui::Button::image_and_text(egui::Image::new((tex.id(), egui::vec2(96.0, 24.0))), t(b.name())),
+                    None => egui::Button::new(t(b.name())),
                 };
                 if ui.add(button.selected(selected)).clicked() {
                     s.set_brush(b);
@@ -192,15 +195,15 @@ fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
             }
         });
         ui.separator();
-        ui.label(egui::RichText::new("Kształt (aktualnym pędzlem)").small().weak());
+        ui.label(egui::RichText::new(t("Kształt (aktualnym pędzlem)")).small().weak());
         ui.horizontal_wrapped(|ui| {
-            if ui.add(egui::Button::new("Odręcznie").selected(s.shape.is_none())).clicked() {
+            if ui.add(egui::Button::new(t("Odręcznie")).selected(s.shape.is_none())).clicked() {
                 s.shape = None;
                 s.tool = Tool::Pen;
                 ui.close();
             }
             for sh in Shape::ALL {
-                if ui.add(egui::Button::new(sh.name()).selected(s.shape == Some(sh))).clicked() {
+                if ui.add(egui::Button::new(t(sh.name())).selected(s.shape == Some(sh))).clicked() {
                     s.shape = Some(sh);
                     s.tool = Tool::Pen;
                     ui.close();
@@ -208,8 +211,8 @@ fn tool_buttons(ui: &mut egui::Ui, s: &mut ToolState) {
             }
         });
     });
-    r.0.on_hover_text("Pędzel");
-    ui.selectable_value(&mut s.tool, Tool::Eraser, "Gumka");
+    r.0.on_hover_text(t("Pędzel"));
+    ui.selectable_value(&mut s.tool, Tool::Eraser, t("Gumka"));
 }
 
 fn colors(ui: &mut egui::Ui, s: &mut ToolState) {
@@ -227,79 +230,83 @@ fn colors(ui: &mut egui::Ui, s: &mut ToolState) {
 
 fn size_slider(ui: &mut egui::Ui, s: &mut ToolState, label: bool) {
     let (value, range, decimals, text) = match s.tool {
-        Tool::Pen | Tool::Hand | Tool::Select => (&mut s.width, 0.5..=64.0, 1, "grubość"),
-        Tool::Text => (&mut s.text_size, 8.0..=240.0, 0, "rozmiar tekstu"),
-        Tool::Measure => (&mut s.width, 0.5..=64.0, 1, "grubość"),
-        Tool::Nudge => (&mut s.nudge, 8.0..=200.0, 0, "zasięg"),
-        Tool::Eraser => (&mut s.eraser, 4.0..=160.0, 0, "rozmiar"),
+        Tool::Pen | Tool::Hand | Tool::Select => (&mut s.width, 0.5..=64.0, 1, t("grubość")),
+        Tool::Text => (&mut s.text_size, 8.0..=240.0, 0, t("rozmiar tekstu")),
+        Tool::Measure => (&mut s.width, 0.5..=64.0, 1, t("grubość")),
+        Tool::Nudge => (&mut s.nudge, 8.0..=200.0, 0, t("zasięg")),
+        Tool::Eraser => (&mut s.eraser, 4.0..=160.0, 0, t("rozmiar")),
     };
     let slider = egui::Slider::new(value, range).logarithmic(true).max_decimals(decimals);
     ui.add(if label { slider.text(text) } else { slider }).on_hover_text(text);
 }
 
 fn history_buttons(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
-    a.undo |= ui.add_enabled(info.can_undo, egui::Button::new("Cofnij")).clicked();
-    a.redo |= ui.add_enabled(info.can_redo, egui::Button::new("Ponów")).clicked();
+    a.undo |= ui.add_enabled(info.can_undo, egui::Button::new(t("Cofnij"))).clicked();
+    a.redo |= ui.add_enabled(info.can_redo, egui::Button::new(t("Ponów"))).clicked();
 }
 
 fn hand_button(ui: &mut egui::Ui, s: &mut ToolState) {
-    ui.selectable_value(&mut s.tool, Tool::Select, "Zaznacz").on_hover_text("Obrysuj kreski palcem, potem przeciągnij je albo zmień rozmiar uchwytem w rogu");
-    ui.selectable_value(&mut s.tool, Tool::Text, "Tekst").on_hover_text("Stuknij w płótno, żeby wpisać tekst (wektorowy)");
-    ui.selectable_value(&mut s.tool, Tool::Nudge, "Wygnij").on_hover_text("Przeciągnij po kreskach, żeby je wygiąć (zasięg – suwak)");
-    ui.selectable_value(&mut s.tool, Tool::Measure, "Miarka").on_hover_text("Przeciągnij, żeby zmierzyć odległość i kąt");
-    ui.selectable_value(&mut s.tool, Tool::Hand, "Przesuń")
-        .on_hover_text("Jeden palec przesuwa płótno, nic nie rysuje. Dwa stuknięcia i przeciągnięcie w górę/dół – zoom.");
+    ui.selectable_value(&mut s.tool, Tool::Select, t("Zaznacz")).on_hover_text(t("Obrysuj kreski palcem, potem przeciągnij je albo zmień rozmiar uchwytem w rogu"));
+    ui.selectable_value(&mut s.tool, Tool::Text, t("Tekst")).on_hover_text(t("Stuknij w płótno, żeby wpisać tekst (wektorowy)"));
+    ui.selectable_value(&mut s.tool, Tool::Nudge, t("Wygnij")).on_hover_text(t("Przeciągnij po kreskach, żeby je wygiąć (zasięg – suwak)"));
+    ui.selectable_value(&mut s.tool, Tool::Measure, t("Miarka")).on_hover_text(t("Przeciągnij, żeby zmierzyć odległość i kąt"));
+    ui.selectable_value(&mut s.tool, Tool::Hand, t("Przesuń"))
+        .on_hover_text(t("Jeden palec przesuwa płótno, nic nie rysuje. Dwa stuknięcia i przeciągnięcie w górę/dół – zoom."));
 }
 
 fn home_button(ui: &mut egui::Ui, a: &mut Actions) {
-    a.home |= ui.button("Początek").on_hover_text("Wróć do początku (Home)").clicked();
+    a.home |= ui.button(t("Początek")).on_hover_text(t("Wróć do początku (Home)")).clicked();
 }
 
 /// "More": photos, bookmarks, export.
 fn photos_button(ui: &mut egui::Ui, a: &mut Actions, s: &mut ToolState) {
-    egui::containers::menu::MenuButton::from_button(egui::Button::new("Więcej")).ui(ui, |ui| {
+    egui::containers::menu::MenuButton::from_button(egui::Button::new(t("Więcej"))).ui(ui, |ui| {
         ui.set_min_width(190.0);
-        if ui.checkbox(&mut s.show_grid, "Siatka (kształty się przyciągają)").changed() {
+        if ui.checkbox(&mut s.show_grid, t("Siatka (kształty się przyciągają)")).changed() {
             a.grid_changed = true;
         }
-        if ui.button("Zdjęcia…").clicked() {
+        if ui.button(t("Zdjęcia…")).clicked() {
             a.photos = true;
             ui.close();
         }
-        if ui.button("Warstwy…").clicked() {
+        if ui.button(t("Warstwy…")).clicked() {
             a.layers = true;
             ui.close();
         }
-        if ui.button("Zakładki…").clicked() {
+        if ui.button(t("Zakładki…")).clicked() {
             a.bookmarks = true;
             ui.close();
         }
-        if ui.button("Eksport do PNG").clicked() {
+        if ui.button(t("Eksport do PNG")).clicked() {
             a.export = true;
             ui.close();
         }
-        if ui.button("Nagrywaj wideo (MP4)").on_hover_text("Nagrywa płótno – rysowanie, przesuwanie, zoom – bez paska narzędzi").clicked() {
+        if ui.button(t("Nagrywaj wideo (MP4)")).on_hover_text(t("Nagrywa płótno – rysowanie, przesuwanie, zoom – bez paska narzędzi")).clicked() {
             a.record = true;
+            ui.close();
+        }
+        if ui.button(t("Ustawienia…")).clicked() {
+            a.settings = true;
             ui.close();
         }
     });
 }
 
 fn menu_button(ui: &mut egui::Ui, a: &mut Actions) {
-    a.menu |= ui.button("Projekty").on_hover_text("Wróć do listy projektów").clicked();
+    a.menu |= ui.button(t("Projekty")).on_hover_text(t("Wróć do listy projektów")).clicked();
 }
 
 /// Shown only while the view is rotated; a tap straightens it.
 fn rotation_button(ui: &mut egui::Ui, info: &Info, a: &mut Actions) {
     let deg = info.rotation.to_degrees().round();
     if deg != 0.0 || info.rotation != 0.0 {
-        a.upright |= ui.button(format!("{deg:.0}°")).on_hover_text("Obrót płótna – stuknij, aby wyprostować").clicked();
+        a.upright |= ui.button(format!("{deg:.0}°")).on_hover_text(t("Obrót płótna – stuknij, aby wyprostować")).clicked();
     }
 }
 
 fn zoom_label(ui: &mut egui::Ui, info: &Info) {
     ui.label(egui::RichText::new(zoom_text(info.log_zoom)).monospace())
-        .on_hover_text(format!("log2 zoomu: {:.2}\nkresek: {}", info.log_zoom, info.strokes));
+        .on_hover_text(tf("log2 zoomu: {}\nkresek: {}", &[&format!("{:.2}", info.log_zoom), &info.strokes]));
 }
 
 pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f32) -> (Actions, Vec<Rect>) {
@@ -339,8 +346,9 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
     let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(anchor, offset).show(ctx, |ui| {
         frame.show(ui, |ui| {
             ui.set_max_width(inner_w);
+            // Rows wrap when a language's words are long (German, Russian…).
             if compact {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     menu_button(ui, &mut a);
                     tool_buttons(ui, s);
                     history_buttons(ui, info, &mut a);
@@ -350,7 +358,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     hand_button(ui, s);
                     photos_button(ui, &mut a, s);
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().slider_width = ui.spacing().slider_width.min(90.0);
                     size_slider(ui, s, false);
                     ui.separator();
@@ -359,7 +367,7 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
                     zoom_label(ui, info);
                 });
             } else {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     menu_button(ui, &mut a);
                     ui.separator();
                     tool_buttons(ui, s);
@@ -493,11 +501,11 @@ pub fn photos_window(
     let max_h = (screen.height() - safe_top - 24.0).max(240.0);
     let mut open = true;
     let title = if st.choosing {
-        "Dodaj zdjęcie"
+        t("Dodaj zdjęcie")
     } else if st.picking {
-        "Wybierz zdjęcie"
+        t("Wybierz zdjęcie")
     } else {
-        "Zdjęcia"
+        t("Zdjęcia")
     };
     egui::Window::new(title)
         .id(egui::Id::unique("photos"))
@@ -509,7 +517,7 @@ pub fn photos_window(
         .show(ctx, |ui| {
             ui.set_width(width - 16.0);
             if let Some(m) = &st.message {
-                ui.label(egui::RichText::new(m).italics());
+                ui.label(egui::RichText::new(crate::i18n::t_dyn(m)).italics());
             }
             if st.choosing {
                 ui.horizontal(|ui| {
@@ -517,30 +525,30 @@ pub fn photos_window(
                         let tex = mini_texture(ui.ctx(), &mut st.thumbs, "pending-preview".into(), img, 160);
                         mini_image(ui, &tex, 96.0);
                     }
-                    ui.label("Jak dodać to zdjęcie?");
+                    ui.label(t("Jak dodać to zdjęcie?"));
                 });
                 ui.add_space(4.0);
-                if ui.button("Do odrysowania – zdjęcie pod rysunkiem").clicked() {
+                if ui.button(t("Do odrysowania – zdjęcie pod rysunkiem")).clicked() {
                     out.push(PhotoAction::UseAsReference);
                 }
                 ui.separator();
-                ui.label("Zamień na rysunek (wektorowy, można go potem edytować):");
+                ui.label(t("Zamień na rysunek (wektorowy, można go potem edytować):"));
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut st.colored, true, "Kolorowy");
-                    ui.selectable_value(&mut st.colored, false, "Same kontury");
+                    ui.selectable_value(&mut st.colored, true, t("Kolorowy"));
+                    ui.selectable_value(&mut st.colored, false, t("Same kontury"));
                 });
-                ui.add(egui::Slider::new(&mut st.detail, 0.0..=1.0).show_value(false).text("szczegóły"));
+                ui.add(egui::Slider::new(&mut st.detail, 0.0..=1.0).show_value(false).text(t("szczegóły")));
                 if st.colored {
-                    ui.checkbox(&mut st.outlines, "kontury na wierzchu (aktualnym pędzlem i kolorem)");
+                    ui.checkbox(&mut st.outlines, t("kontury na wierzchu (aktualnym pędzlem i kolorem)"));
                 } else {
-                    ui.label(egui::RichText::new("Kontury aktualnym pędzlem, kolorem i grubością.").small().weak());
+                    ui.label(egui::RichText::new(t("Kontury aktualnym pędzlem, kolorem i grubością.")).small().weak());
                 }
-                ui.checkbox(&mut st.keep_photo, "zostaw blade zdjęcie pod spodem");
+                ui.checkbox(&mut st.keep_photo, t("zostaw blade zdjęcie pod spodem"));
                 ui.horizontal(|ui| {
-                    if ui.button("Zamień na rysunek").clicked() {
+                    if ui.button(t("Zamień na rysunek")).clicked() {
                         out.push(PhotoAction::Convert);
                     }
-                    if ui.button("Anuluj").clicked() {
+                    if ui.button(t("Anuluj")).clicked() {
                         out.push(PhotoAction::CancelChoice);
                     }
                 });
@@ -550,11 +558,11 @@ pub fn photos_window(
                 picker(ui, st, lib, max_h - 120.0, &mut out);
                 return;
             }
-            if ui.button("Dodaj zdjęcie").clicked() {
+            if ui.button(t("Dodaj zdjęcie")).clicked() {
                 out.push(PhotoAction::StartPicking);
             }
             if photos.is_empty() {
-                ui.label(egui::RichText::new("Dodane zdjęcie leży pod rysunkiem – możesz je odrysować.").weak());
+                ui.label(egui::RichText::new(t("Dodane zdjęcie leży pod rysunkiem – możesz je odrysować.")).weak());
             }
             for (i, p) in photos.iter().enumerate() {
                 ui.separator();
@@ -563,20 +571,20 @@ pub fn photos_window(
                         let tex = mini_texture(ui.ctx(), &mut st.thumbs, format!("photo:{}", p.id), img, 128);
                         mini_image(ui, &tex, 56.0);
                     }
-                    ui.label(format!("Zdjęcie {}", i + 1));
+                    ui.label(tf("Zdjęcie {}", &[&(i + 1)]));
                     let mut o = p.opacity;
-                    if ui.add(egui::Slider::new(&mut o, 0.05..=1.0).show_value(false).text("krycie")).changed() {
+                    if ui.add(egui::Slider::new(&mut o, 0.05..=1.0).show_value(false).text(t("krycie"))).changed() {
                         out.push(PhotoAction::Opacity(p.id, o));
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Przesuń / skaluj").clicked() {
+                    if ui.button(t("Przesuń / skaluj")).clicked() {
                         out.push(PhotoAction::Edit(p.id));
                     }
-                    if ui.button(if p.visible { "Ukryj" } else { "Pokaż" }).clicked() {
+                    if ui.button(if p.visible { t("Ukryj") } else { t("Pokaż") }).clicked() {
                         out.push(PhotoAction::ToggleVisible(p.id));
                     }
-                    if ui.button("Usuń").clicked() {
+                    if ui.button(t("Usuń")).clicked() {
                         out.push(PhotoAction::Delete(p.id));
                     }
                 });
@@ -593,28 +601,28 @@ pub fn photos_window(
 }
 
 fn picker(ui: &mut egui::Ui, st: &mut PhotoPanel, lib: Option<&mut crate::photos::PhotoLibrary>, max_h: f32, out: &mut Vec<PhotoAction>) {
-    if ui.button("Wróć").clicked() {
+    if ui.button(t("Wróć")).clicked() {
         st.picking = false;
         return;
     }
     let Some(lib) = lib else {
-        ui.label("Wybieranie zdjęć nie jest dostępne na tym urządzeniu.");
+        ui.label(t("Wybieranie zdjęć nie jest dostępne na tym urządzeniu."));
         return;
     };
     if lib.busy {
-        ui.label("Wczytywanie zdjęcia…");
+        ui.label(t("Wczytywanie zdjęcia…"));
     }
     match &lib.entries {
         None => {
-            ui.label("Szukam zdjęć…");
+            ui.label(t("Szukam zdjęć…"));
         }
         Some(Err(e)) => {
-            ui.label(e.as_str());
+            ui.label(crate::i18n::t_dyn(e));
             ui.horizontal(|ui| {
-                if ui.button("Zezwól na dostęp do zdjęć").clicked() {
+                if ui.button(t("Zezwól na dostęp do zdjęć")).clicked() {
                     out.push(PhotoAction::RequestAccess);
                 }
-                if ui.button("Odśwież").clicked() {
+                if ui.button(t("Odśwież")).clicked() {
                     lib.refresh();
                 }
             });
@@ -691,7 +699,7 @@ pub fn bookmarks_window(ctx: &egui::Context, st: &mut BookmarkPanel, names: &[St
     let width = (screen.width() - 16.0).min(440.0);
     let max_h = (screen.height() - safe_top - 140.0).max(200.0);
     let mut open = true;
-    egui::Window::new("Zakładki")
+    egui::Window::new(t("Zakładki"))
         .id(egui::Id::unique("bookmarks"))
         .open(&mut open)
         .collapsible(false)
@@ -701,20 +709,20 @@ pub fn bookmarks_window(ctx: &egui::Context, st: &mut BookmarkPanel, names: &[St
         .show(ctx, |ui| {
             ui.set_width(width - 16.0);
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Dodaj zakładkę (obecny widok)").clicked() {
+                if ui.button(t("Dodaj zakładkę (obecny widok)")).clicked() {
                     out.push(BookmarkAction::Add);
                 }
                 if ui
-                    .add_enabled(names.len() >= 2, egui::Button::new("Wideo MP4"))
-                    .on_hover_text("Film z przelotem przez zakładki po kolei")
-                    .on_disabled_hover_text("Potrzebne są co najmniej 2 zakładki")
+                    .add_enabled(names.len() >= 2, egui::Button::new(t("Wideo MP4")))
+                    .on_hover_text(t("Film z przelotem przez zakładki po kolei"))
+                    .on_disabled_hover_text(t("Potrzebne są co najmniej 2 zakładki"))
                     .clicked()
                 {
                     out.push(BookmarkAction::ExportVideo);
                 }
             });
             if names.is_empty() {
-                ui.label(egui::RichText::new("Zakładka zapamiętuje miejsce, przybliżenie i obrót. Stuknij ją, żeby tam przelecieć.").weak());
+                ui.label(egui::RichText::new(t("Zakładka zapamiętuje miejsce, przybliżenie i obrót. Stuknij ją, żeby tam przelecieć.")).weak());
             }
             egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).max_height(max_h).show(ui, |ui| {
                 for (i, name) in names.iter().enumerate() {
@@ -725,7 +733,7 @@ pub fn bookmarks_window(ctx: &egui::Context, st: &mut BookmarkPanel, names: &[St
                         let mut done = false;
                         ui.horizontal(|ui| {
                             let r = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width() - 70.0));
-                            done = ui.button("OK").clicked() || (r.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)));
+                            done = ui.button(t("OK")).clicked() || (r.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)));
                         });
                         if done {
                             out.push(BookmarkAction::Rename(i, text.clone()));
@@ -738,13 +746,13 @@ pub fn bookmarks_window(ctx: &egui::Context, st: &mut BookmarkPanel, names: &[St
                             out.push(BookmarkAction::Go(i));
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Usuń").clicked() {
+                            if ui.button(t("Usuń")).clicked() {
                                 out.push(BookmarkAction::Delete(i));
                             }
-                            if ui.button("Nazwa").clicked() {
+                            if ui.button(t("Nazwa")).clicked() {
                                 st.renaming = Some((i, name.clone()));
                             }
-                            if ui.button("Leć").clicked() {
+                            if ui.button(t("Leć")).clicked() {
                                 out.push(BookmarkAction::Go(i));
                             }
                         });
@@ -797,7 +805,7 @@ pub fn layers_window(ctx: &egui::Context, st: &mut LayerPanel, layers: &[LayerIn
     let width = (screen.width() - 16.0).min(460.0);
     let max_h = (screen.height() - safe_top - 140.0).max(200.0);
     let mut open = true;
-    egui::Window::new("Warstwy")
+    egui::Window::new(t("Warstwy"))
         .id(egui::Id::unique("layers"))
         .open(&mut open)
         .collapsible(false)
@@ -806,10 +814,10 @@ pub fn layers_window(ctx: &egui::Context, st: &mut LayerPanel, layers: &[LayerIn
         .fixed_size([width, 0.0])
         .show(ctx, |ui| {
             ui.set_width(width - 16.0);
-            if ui.button("Dodaj warstwę").clicked() {
+            if ui.button(t("Dodaj warstwę")).clicked() {
                 out.push(LayerAction::Add);
             }
-            ui.label(egui::RichText::new("Rysujesz na zaznaczonej warstwie. Gumka ściera tylko na niej.").small().weak());
+            ui.label(egui::RichText::new(t("Rysujesz na zaznaczonej warstwie. Gumka ściera tylko na niej.")).small().weak());
             egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL).max_height(max_h).show(ui, |ui| {
                 let n = layers.len();
                 for (pos, l) in layers.iter().enumerate().rev() {
@@ -820,7 +828,7 @@ pub fn layers_window(ctx: &egui::Context, st: &mut LayerPanel, layers: &[LayerIn
                         let mut done = false;
                         ui.horizontal(|ui| {
                             let r = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width() - 70.0));
-                            done = ui.button("OK").clicked() || (r.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)));
+                            done = ui.button(t("OK")).clicked() || (r.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)));
                         });
                         if done {
                             out.push(LayerAction::Rename(l.id, text.clone()));
@@ -835,35 +843,35 @@ pub fn layers_window(ctx: &egui::Context, st: &mut LayerPanel, layers: &[LayerIn
                             out.push(LayerAction::Select(l.id));
                         }
                         if !l.visible {
-                            ui.label(egui::RichText::new("ukryta").small().weak());
+                            ui.label(egui::RichText::new(t("ukryta")).small().weak());
                         }
                         let mut o = l.opacity;
-                        if ui.add(egui::Slider::new(&mut o, 0.0..=1.0).show_value(false)).on_hover_text("krycie").changed() {
+                        if ui.add(egui::Slider::new(&mut o, 0.0..=1.0).show_value(false)).on_hover_text(t("krycie")).changed() {
                             out.push(LayerAction::Opacity(l.id, o));
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button(if l.visible { "Ukryj" } else { "Pokaż" }).clicked() {
+                        if ui.button(if l.visible { t("Ukryj") } else { t("Pokaż") }).clicked() {
                             out.push(LayerAction::ToggleVisible(l.id));
                         }
-                        if ui.add_enabled(pos + 1 < n, egui::Button::new("W górę")).clicked() {
+                        if ui.add_enabled(pos + 1 < n, egui::Button::new(t("W górę"))).clicked() {
                             out.push(LayerAction::Up(l.id));
                         }
-                        if ui.add_enabled(pos > 0, egui::Button::new("W dół")).clicked() {
+                        if ui.add_enabled(pos > 0, egui::Button::new(t("W dół"))).clicked() {
                             out.push(LayerAction::Down(l.id));
                         }
-                        if ui.button("Nazwa").clicked() {
+                        if ui.button(t("Nazwa")).clicked() {
                             st.renaming = Some((l.id, l.name.clone()));
                         }
                         if st.confirm_delete == Some(l.id) {
-                            if ui.button(egui::RichText::new("Usuń z kreskami").color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
+                            if ui.button(egui::RichText::new(t("Usuń z kreskami")).color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
                                 out.push(LayerAction::Delete(l.id));
                                 st.confirm_delete = None;
                             }
-                            if ui.button("Nie").clicked() {
+                            if ui.button(t("Nie")).clicked() {
                                 st.confirm_delete = None;
                             }
-                        } else if ui.add_enabled(n > 1, egui::Button::new("Usuń")).clicked() {
+                        } else if ui.add_enabled(n > 1, egui::Button::new(t("Usuń"))).clicked() {
                             st.confirm_delete = Some(l.id);
                         }
                     });
@@ -892,17 +900,17 @@ pub fn selection_bar(ctx: &egui::Context, count: usize) -> (Option<SelectionActi
     let r = egui::Area::new(egui::Id::unique("selection-bar")).anchor(Align2::CENTER_BOTTOM, [0.0, -24.0]).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(format!("Zaznaczone: {count}"));
-                if ui.button("Usuń").clicked() {
+                ui.label(tf("Zaznaczone: {}", &[&count]));
+                if ui.button(t("Usuń")).clicked() {
                     out = Some(SelectionAction::Delete);
                 }
-                if ui.button("Duplikuj").clicked() {
+                if ui.button(t("Duplikuj")).clicked() {
                     out = Some(SelectionAction::Duplicate);
                 }
-                if ui.button("Kolor").on_hover_text("Nadaj zaznaczonym kreskom aktualny kolor").clicked() {
+                if ui.button(t("Kolor")).on_hover_text(t("Nadaj zaznaczonym kreskom aktualny kolor")).clicked() {
                     out = Some(SelectionAction::Recolor);
                 }
-                if ui.button("Gotowe").clicked() {
+                if ui.button(t("Gotowe")).clicked() {
                     out = Some(SelectionAction::Done);
                 }
             });
@@ -933,7 +941,7 @@ pub fn text_window(ctx: &egui::Context, st: &mut TextPanel, size: &mut f32, safe
     let mut out = None;
     let width = (ctx.content_rect().width() - 16.0).min(440.0);
     let mut open = true;
-    egui::Window::new("Tekst")
+    egui::Window::new(t("Tekst"))
         .id(egui::Id::unique("text"))
         .open(&mut open)
         .collapsible(false)
@@ -942,20 +950,20 @@ pub fn text_window(ctx: &egui::Context, st: &mut TextPanel, size: &mut f32, safe
         .fixed_size([width, 0.0])
         .show(ctx, |ui| {
             ui.set_width(width - 16.0);
-            let r = ui.add(egui::TextEdit::multiline(&mut st.text).desired_rows(3).desired_width(f32::INFINITY).hint_text("Wpisz tekst…"));
+            let r = ui.add(egui::TextEdit::multiline(&mut st.text).desired_rows(3).desired_width(f32::INFINITY).hint_text(t("Wpisz tekst…")));
             if !r.has_focus() && st.text.is_empty() {
                 r.request_focus();
             }
-            ui.add(egui::Slider::new(size, 8.0..=240.0).logarithmic(true).max_decimals(0).text("rozmiar"));
+            ui.add(egui::Slider::new(size, 8.0..=240.0).logarithmic(true).max_decimals(0).text(t("rozmiar")));
             ui.horizontal(|ui| {
-                if ui.add_enabled(!st.text.trim().is_empty(), egui::Button::new("Dodaj")).clicked() {
+                if ui.add_enabled(!st.text.trim().is_empty(), egui::Button::new(t("Dodaj"))).clicked() {
                     out = Some(TextAction::Add);
                 }
-                if ui.button("Anuluj").clicked() {
+                if ui.button(t("Anuluj")).clicked() {
                     out = Some(TextAction::Cancel);
                 }
             });
-            ui.label(egui::RichText::new("Tekst jest wektorowy: ostry przy każdym zoomie, w aktualnym kolorze.").small().weak());
+            ui.label(egui::RichText::new(t("Tekst jest wektorowy: ostry przy każdym zoomie, w aktualnym kolorze.")).small().weak());
         });
     if !open {
         out = Some(TextAction::Cancel);
@@ -973,7 +981,7 @@ pub fn recording_badge(ctx: &egui::Context, seconds: f64, safe_top: f32) -> (boo
         .anchor(Align2::RIGHT_BOTTOM, [-12.0, -84.0])
         .show(ctx, |ui| {
         let s = seconds as u64;
-        let text = egui::RichText::new(format!("● Nagrywanie {}:{:02} – zakończ", s / 60, s % 60)).color(Color32::WHITE).strong();
+        let text = egui::RichText::new(tf("● Nagrywanie {} – zakończ", &[&format!("{}:{:02}", s / 60, s % 60)])).color(Color32::WHITE).strong();
         stop = ui
             .add(egui::Button::new(text.size(16.0)).fill(Color32::from_rgb(0xd3, 0x2f, 0x2f)).min_size(egui::vec2(0.0, 48.0)).corner_radius(CornerRadius::same(24)))
             .clicked();
@@ -1002,7 +1010,7 @@ pub fn image_edit_bar(ctx: &egui::Context) -> (bool, Rect) {
             egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
                 ui.set_max_width(max_w);
                 ui.vertical_centered(|ui| {
-                    ui.label("Przesuń zdjęcie palcem, dwoma palcami skaluj i obracaj");
+                    ui.label(t("Przesuń zdjęcie palcem, dwoma palcami skaluj i obracaj"));
                     done = ui.button("    Gotowe    ").clicked();
                 });
             });
@@ -1031,6 +1039,7 @@ pub enum GalleryAction {
     Rename { from: String, to: String },
     Duplicate(String),
     Delete(String),
+    Settings,
 }
 
 const CARD_MIN_WIDTH: f32 = 150.0;
@@ -1058,10 +1067,15 @@ pub fn gallery(root: &mut egui::Ui, st: &mut GalleryState, projects: &Projects, 
         .show(root, |ui| {
             ui.add_space(safe_top + 16.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Projekty").size(28.0).strong());
+                ui.label(egui::RichText::new(t("Projekty")).size(28.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(t("Ustawienia…")).clicked() {
+                        out.push(GalleryAction::Settings);
+                    }
+                });
             });
             if let Some(m) = &st.message {
-                ui.label(egui::RichText::new(m).italics().weak());
+                ui.label(egui::RichText::new(crate::i18n::t_dyn(m)).italics().weak());
             }
             ui.add_space(8.0);
             let avail = ui.available_width();
@@ -1084,7 +1098,7 @@ pub fn gallery(root: &mut egui::Ui, st: &mut GalleryState, projects: &Projects, 
                                 match item {
                                     None => {
                                         painter.text(rect.center() - egui::vec2(0.0, 14.0), Align2::CENTER_CENTER, "+", egui::FontId::proportional(56.0), Color32::from_gray(90));
-                                        painter.text(rect.center() + egui::vec2(0.0, 30.0), Align2::CENTER_CENTER, "Nowa kartka", egui::FontId::proportional(16.0), Color32::from_gray(70));
+                                        painter.text(rect.center() + egui::vec2(0.0, 30.0), Align2::CENTER_CENTER, t("Nowa kartka"), egui::FontId::proportional(16.0), Color32::from_gray(70));
                                         if resp.clicked() {
                                             out.push(GalleryAction::New);
                                         }
@@ -1107,7 +1121,7 @@ pub fn gallery(root: &mut egui::Ui, st: &mut GalleryState, projects: &Projects, 
                                             ui.add(egui::Label::new(egui::RichText::new(&p.name).strong()).truncate());
                                             ui.label(egui::RichText::new(projects::ago(p.modified)).small().weak());
                                         });
-                                        if ui.add_enabled(!dialog_open, egui::Button::new("•••")).on_hover_text("Opcje").clicked() {
+                                        if ui.add_enabled(!dialog_open, egui::Button::new("•••")).on_hover_text(t("Opcje")).clicked() {
                                             st.options = Some(p.name.clone());
                                             st.name_edit = p.name.clone();
                                             st.confirm_delete = false;
@@ -1127,7 +1141,7 @@ pub fn gallery(root: &mut egui::Ui, st: &mut GalleryState, projects: &Projects, 
     if let Some(name) = st.options.clone() {
         let mut open = true;
         let width = (ctx.content_rect().width() - 32.0).min(400.0);
-        egui::Window::new("Opcje projektu")
+        egui::Window::new(t("Opcje projektu"))
             .id(egui::Id::unique("project-options"))
             .open(&mut open)
             .collapsible(false)
@@ -1136,30 +1150,30 @@ pub fn gallery(root: &mut egui::Ui, st: &mut GalleryState, projects: &Projects, 
             .fixed_size([width, 0.0])
             .show(&ctx, |ui| {
                 ui.set_width(width - 16.0);
-                ui.label(egui::RichText::new("Nazwa").small().weak());
+                ui.label(egui::RichText::new(t("Nazwa")).small().weak());
                 let r = ui.add(egui::TextEdit::singleline(&mut st.name_edit).desired_width(f32::INFINITY));
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let changed = !st.name_edit.trim().is_empty() && st.name_edit.trim() != name;
                 ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(changed, egui::Button::new("Zmień nazwę")).clicked() || (enter && changed) {
+                    if ui.add_enabled(changed, egui::Button::new(t("Zmień nazwę"))).clicked() || (enter && changed) {
                         out.push(GalleryAction::Rename { from: name.clone(), to: st.name_edit.clone() });
                     }
-                    if ui.button("Duplikuj").clicked() {
+                    if ui.button(t("Duplikuj")).clicked() {
                         out.push(GalleryAction::Duplicate(name.clone()));
                     }
                     if st.confirm_delete {
-                        if ui.button(egui::RichText::new("Usuń na zawsze").color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
+                        if ui.button(egui::RichText::new(t("Usuń na zawsze")).color(Color32::from_rgb(0xc6, 0x28, 0x28))).clicked() {
                             out.push(GalleryAction::Delete(name.clone()));
                         }
-                        if ui.button("Nie usuwaj").clicked() {
+                        if ui.button(t("Nie usuwaj")).clicked() {
                             st.confirm_delete = false;
                         }
-                    } else if ui.button("Usuń").clicked() {
+                    } else if ui.button(t("Usuń")).clicked() {
                         st.confirm_delete = true;
                     }
                 });
                 if let Some(m) = &st.message {
-                    ui.label(egui::RichText::new(m).italics());
+                    ui.label(egui::RichText::new(crate::i18n::t_dyn(m)).italics());
                 }
             });
         if !open {
@@ -1276,4 +1290,65 @@ mod layout_tests {
         assert!(!clicked, "a drag is not a click");
     }
 
+}
+
+/// What the settings window asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsAction {
+    Save,
+    Cancel,
+}
+
+/// Language and phone / tablet. On the first start (`first_run`) it greets the user and
+/// can't be cancelled. The language list switches the window's own texts at once.
+pub fn settings_window(ctx: &egui::Context, draft: &mut crate::settings::Settings, first_run: bool) -> Option<SettingsAction> {
+    use crate::i18n::{Lang, t_in};
+    use crate::settings::Device;
+    let lang = draft.lang;
+    let tr = |pl: &'static str| t_in(lang, pl);
+    let mut out = None;
+    let max_w = (ctx.content_rect().width() - 64.0).clamp(200.0, 460.0);
+    egui::Modal::new(egui::Id::unique("settings")).show(ctx, |ui| {
+            ui.heading(if first_run { tr("Witaj!") } else { tr("Ustawienia") });
+            ui.add_space(4.0);
+            ui.set_width(max_w);
+            if first_run {
+                ui.label(tr("Wybierz język i urządzenie. Możesz to zmienić później w Więcej → Ustawienia."));
+                ui.add_space(6.0);
+            }
+            ui.label(egui::RichText::new(tr("Język")).strong());
+            egui::Grid::new("langs").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                for (i, l) in Lang::ALL.into_iter().enumerate() {
+                    let b = egui::Button::new(l.native_name()).selected(draft.lang == l).min_size(egui::vec2(max_w * 0.5 - 8.0, 0.0));
+                    if ui.add(b).clicked() {
+                        draft.lang = l;
+                    }
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new(tr("Urządzenie")).strong());
+            for (d, name, about) in [
+                (Device::Phone, "Telefon", "Telefon: narzędzia w kilku rzędach, wygodne na wąskim ekranie."),
+                (Device::Tablet, "Tablet", "Tablet: większe przyciski i tekst, narzędzia w jednym rzędzie na szerokim ekranie."),
+            ] {
+                let b = egui::Button::new(egui::RichText::new(tr(name)).strong()).selected(draft.device == d).min_size(egui::vec2(max_w, 0.0));
+                if ui.add(b).clicked() {
+                    draft.device = d;
+                }
+                ui.label(egui::RichText::new(tr(about)).small().weak());
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(egui::RichText::new(if first_run { tr("Zaczynamy") } else { tr("Gotowe") }).strong()).clicked() {
+                    out = Some(SettingsAction::Save);
+                }
+                if !first_run && ui.button(tr("Anuluj")).clicked() {
+                    out = Some(SettingsAction::Cancel);
+                }
+            });
+        });
+    out
 }

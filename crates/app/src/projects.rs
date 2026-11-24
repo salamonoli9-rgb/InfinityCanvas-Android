@@ -1,5 +1,6 @@
 //! Projects ("kartki"): one `.icnv` file per drawing in a projects folder.
 
+use crate::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -29,7 +30,7 @@ impl Projects {
         let p = Self { root: data_dir.to_path_buf(), dir };
         let legacy = data_dir.join("canvas.icnv");
         if legacy.exists() {
-            let name = p.unique_name(DEFAULT_BASE);
+            let name = p.unique_name(t(DEFAULT_BASE));
             std::fs::rename(&legacy, p.path_for(&name))?;
             p.set_last(&name);
             log::info!("moved the old drawing to project {name:?}");
@@ -99,24 +100,25 @@ impl Projects {
     /// `base`, or `base 2`, `base 3`… – the first name not taken yet.
     pub fn unique_name(&self, base: &str) -> String {
         let base = base.trim();
-        if !base.is_empty() && !self.exists(base) && base != DEFAULT_BASE {
+        // The default base name always gets a number ("Rysunek 1", "Drawing 1"…).
+        if !base.is_empty() && !self.exists(base) && base != DEFAULT_BASE && base != t(DEFAULT_BASE) {
             return base.to_string();
         }
-        let base = if base.is_empty() { DEFAULT_BASE } else { base };
+        let base = if base.is_empty() { t(DEFAULT_BASE) } else { base };
         (1..).map(|i| format!("{base} {i}")).find(|n| !self.exists(n)).expect("infinite iterator")
     }
 
     pub fn new_name(&self) -> String {
-        self.unique_name(DEFAULT_BASE)
+        self.unique_name(t(DEFAULT_BASE))
     }
 
     pub fn rename(&self, from: &str, to: &str) -> Result<String, String> {
-        let to = sanitize(to).ok_or("Nieprawidłowa nazwa")?;
+        let to = sanitize(to).ok_or(t("Nieprawidłowa nazwa"))?;
         if to == from {
             return Ok(to);
         }
         if self.exists(&to) {
-            return Err(format!("Projekt „{to}” już istnieje"));
+            return Err(tf("Projekt „{}” już istnieje", &[&to]));
         }
         let src = self.path_for(from);
         if src.exists() {
@@ -127,7 +129,7 @@ impl Projects {
     }
 
     pub fn duplicate(&self, name: &str) -> Result<String, String> {
-        let copy = self.unique_name(&format!("{name} (kopia)"));
+        let copy = self.unique_name(&tf("{} (kopia)", &[&name]));
         std::fs::copy(self.path_for(name), self.path_for(&copy)).map_err(|e| e.to_string())?;
         let _ = std::fs::copy(self.thumb_path(name), self.thumb_path(&copy));
         Ok(copy)
@@ -168,16 +170,16 @@ pub fn sanitize(name: &str) -> Option<String> {
 }
 
 /// "przed chwilą", "5 min temu", "3 godz. temu", "2 dni temu".
-pub fn ago(t: Option<SystemTime>) -> String {
-    let Some(s) = t.and_then(|t| SystemTime::now().duration_since(t).ok()).map(|d| d.as_secs()) else {
+pub fn ago(when: Option<SystemTime>) -> String {
+    let Some(s) = when.and_then(|w| SystemTime::now().duration_since(w).ok()).map(|d| d.as_secs()) else {
         return String::new();
     };
     match s {
-        0..60 => "przed chwilą".into(),
-        60..3600 => format!("{} min temu", s / 60),
-        3600..86400 => format!("{} godz. temu", s / 3600),
-        86400..172800 => "wczoraj".into(),
-        _ => format!("{} dni temu", s / 86400),
+        0..60 => t("przed chwilą").into(),
+        60..3600 => tf("{} min temu", &[&(s / 60)]),
+        3600..86400 => tf("{} godz. temu", &[&(s / 3600)]),
+        86400..172800 => t("wczoraj").into(),
+        _ => tf("{} dni temu", &[&(s / 86400)]),
     }
 }
 

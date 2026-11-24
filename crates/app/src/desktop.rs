@@ -234,7 +234,10 @@ pub fn run() {
         None => {
             let dir = data_dir();
             log::info!("data folder: {}", dir.display());
-            CanvasApp::with_projects(&dir)
+            let mut app = CanvasApp::with_projects(&dir);
+            let locale = std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")).unwrap_or_default();
+            app.load_settings(&dir, crate::i18n::Lang::from_code(&locale));
+            app
         }
     };
     let mut app = app;

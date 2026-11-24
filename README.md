@@ -186,6 +186,18 @@ rozdzielczości ekranu: na telefonie w galerii (Obrazy → „Nieskończone pł�
 Pociągnięcie zaczęte palcem jest anulowane, jeśli w ciągu ćwierć sekundy dołoży się drugi palec
 (start szczypania).
 
+## Języki i pierwsze uruchomienie
+
+Przy pierwszym uruchomieniu ekran powitalny pyta o **język** (polski, angielski, niemiecki,
+rosyjski, ukraiński, hiszpański, francuski, włoski; wstępnie zaznaczony język telefonu / systemu)
+i **urządzenie**: *Telefon* (obecny układ) albo *Tablet* (przyciski i tekst o 25 % większe).
+Wybór trafia do `settings.txt` w folderze danych; zmienia się go w **Więcej → Ustawienia…** albo
+przyciskiem **Ustawienia…** w galerii projektów. Tłumaczenia są w `crates/app/src/i18n.rs`
+(polski tekst jest kluczem, brakujące tłumaczenie → polski).
+
+Po obróceniu ekranu płótno od razu dopasowuje się do nowego kształtu (środek i skala zostają),
+działają wszystkie cztery orientacje z poszanowaniem blokady obrotu.
+
 ## Projekty
 
 Aplikacja startuje od **galerii projektów**: kafelki z miniaturką, nazwą i datą zmiany oraz kafelek

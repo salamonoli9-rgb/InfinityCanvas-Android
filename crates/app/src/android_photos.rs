@@ -201,7 +201,7 @@ impl MediaStorePhotos {
             env.delete_local_ref(arr)?;
         }
         env.call_method(&stream, "close", "()V", &[])?;
-        Ok(Some(format!("Galeria → {folder}")))
+        Ok(Some(crate::i18n::tf("Galeria → {}", &[&folder])))
     }
 
     /// Runs `f` with an attached env; Java exceptions become `None`.
@@ -432,7 +432,7 @@ impl MediaCodecSink {
             env.delete_local_ref(arr)?;
         }
         env.call_method(&stream, "close", "()V", &[])?;
-        Ok(format!("Galeria → {folder}"))
+        Ok(crate::i18n::tf("Galeria → {}", &[&folder]))
     }
 }
 

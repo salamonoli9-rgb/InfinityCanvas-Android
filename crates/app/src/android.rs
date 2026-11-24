@@ -244,6 +244,11 @@ fn android_main(app: AndroidApp) {
         Some(d) => CanvasApp::with_projects(d),
         None => CanvasApp::new(None),
     };
+    if let Some(d) = &data_dir {
+        // The phone's language preselected on the welcome screen.
+        let lang = app.config().language().map_or(crate::i18n::Lang::Pl, |l| crate::i18n::Lang::from_code(&l));
+        canvas.load_settings(d, lang);
+    }
     canvas.pixels_per_point = density.max(1.0);
     // SAFETY: pointers come straight from android-activity and live as long as the process.
     match unsafe { crate::android_photos::MediaStorePhotos::new(app.vm_as_ptr(), app.activity_as_ptr()) } {
