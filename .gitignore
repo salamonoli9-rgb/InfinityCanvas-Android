@@ -4,3 +4,6 @@ android/app/build/
 android/.gradle/
 android/app/src/main/jniLibs/
 *.apk
+
+# The ready-to-install app is kept in the repository.
+!apk/*.apk
