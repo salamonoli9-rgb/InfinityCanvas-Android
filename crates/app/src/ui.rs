@@ -45,10 +45,12 @@ pub struct ToolState {
     /// Eraser diameter in logical points.
     pub eraser: f32,
     pub palette: Vec<Color32>,
-    /// Toolbar folded open (false = only a small tab at the top; tap it to slide the bar out).
+    /// The full menu (under ☰) is open.
     pub bar_open: bool,
-    /// Slide the toolbar away while a stroke is being drawn (it comes back when the finger lifts).
+    /// Fold the menu away when a stroke starts.
     pub bar_autohide: bool,
+    /// What the quick squares next to ☰ do (More → Quick buttons).
+    pub quick: [Quick; QUICK_SLOTS],
 }
 
 impl ToolState {
@@ -102,8 +104,9 @@ impl Default for ToolState {
             color: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             width: 3.0,
             eraser: 24.0,
-            bar_open: true,
+            bar_open: false,
             bar_autohide: true,
+            quick: Quick::DEFAULT,
             palette: vec![
                 Color32::from_rgb(0x1d, 0x1d, 0x1f),
                 Color32::from_rgb(0x8e, 0x8e, 0x93),
@@ -154,6 +157,8 @@ pub struct Actions {
     pub grid_changed: bool,
     /// Open the settings (language, phone / tablet).
     pub settings: bool,
+    /// Open the window choosing the quick squares.
+    pub quick_settings: bool,
 }
 
 /// "×10^31", "250%", "×1/1000" style zoom text.
@@ -273,7 +278,7 @@ fn photos_button(ui: &mut egui::Ui, a: &mut Actions, s: &mut ToolState) {
         if ui.checkbox(&mut s.show_grid, t("Siatka (kształty się przyciągają)")).changed() {
             a.grid_changed = true;
         }
-        ui.checkbox(&mut s.bar_autohide, t("Chowaj pasek podczas rysowania"));
+        ui.checkbox(&mut s.bar_autohide, t("Chowaj menu podczas rysowania"));
         if ui.button(t("Zdjęcia…")).clicked() {
             a.photos = true;
             ui.close();
@@ -292,6 +297,10 @@ fn photos_button(ui: &mut egui::Ui, a: &mut Actions, s: &mut ToolState) {
         }
         if ui.button(t("Nagrywaj wideo (MP4)")).on_hover_text(t("Nagrywa płótno – rysowanie, przesuwanie, zoom – bez paska narzędzi")).clicked() {
             a.record = true;
+            ui.close();
+        }
+        if ui.button(t("Szybkie przyciski…")).clicked() {
+            a.quick_settings = true;
             ui.close();
         }
         if ui.button(t("Ustawienia…")).clicked() {
@@ -318,42 +327,333 @@ fn zoom_label(ui: &mut egui::Ui, info: &Info) {
         .on_hover_text(tf("log2 zoomu: {}\nkresek: {}", &[&format!("{:.2}", info.log_zoom), &info.strokes]));
 }
 
-/// Small button with a drawn chevron (no font glyph needed): up = fold the bar, down = unfold.
-fn chevron_button(ui: &mut egui::Ui, up: bool) -> egui::Response {
-    let side = ui.spacing().interact_size.y;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(side * 0.9, side), Sense::click());
-    let v = ui.style().interact(&resp);
-    ui.painter().rect_filled(rect, CornerRadius::same(6), v.weak_bg_fill);
-    let c = rect.center();
-    let (w, h) = (side * 0.18, side * 0.1);
-    let dir = if up { -1.0 } else { 1.0 };
-    let pts = vec![egui::pos2(c.x - w, c.y - h * dir), egui::pos2(c.x, c.y + h * dir), egui::pos2(c.x + w, c.y - h * dir)];
-    ui.painter().add(egui::Shape::line(pts, Stroke::new(2.0, v.fg_stroke.color)));
+/// What a quick square next to the ☰ menu does (chosen in More → Quick buttons).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quick {
+    None,
+    Pen,
+    Eraser,
+    Hand,
+    Select,
+    Text,
+    Measure,
+    Nudge,
+    Undo,
+    Redo,
+    Home,
+    Grid,
+    Color,
+    Photos,
+    Layers,
+}
+
+/// How many quick squares there are (empty ones are not shown).
+pub const QUICK_SLOTS: usize = 5;
+
+impl Quick {
+    pub const ALL: [Quick; 15] = [
+        Quick::None, Quick::Pen, Quick::Eraser, Quick::Hand, Quick::Select, Quick::Text, Quick::Measure, Quick::Nudge,
+        Quick::Undo, Quick::Redo, Quick::Home, Quick::Grid, Quick::Color, Quick::Photos, Quick::Layers,
+    ];
+    pub const DEFAULT: [Quick; QUICK_SLOTS] = [Quick::Pen, Quick::Eraser, Quick::Hand, Quick::Undo, Quick::Redo];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Quick::None => t("Puste"),
+            Quick::Pen => t("Rysuj"),
+            Quick::Eraser => t("Gumka"),
+            Quick::Hand => t("Przesuń"),
+            Quick::Select => t("Zaznacz"),
+            Quick::Text => t("Tekst"),
+            Quick::Measure => t("Miarka"),
+            Quick::Nudge => t("Wygnij"),
+            Quick::Undo => t("Cofnij"),
+            Quick::Redo => t("Ponów"),
+            Quick::Home => t("Początek"),
+            Quick::Grid => t("Siatka"),
+            Quick::Color => t("Kolor"),
+            Quick::Photos => t("Zdjęcia"),
+            Quick::Layers => t("Warstwy"),
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Quick::None => "none",
+            Quick::Pen => "pen",
+            Quick::Eraser => "eraser",
+            Quick::Hand => "hand",
+            Quick::Select => "select",
+            Quick::Text => "text",
+            Quick::Measure => "measure",
+            Quick::Nudge => "nudge",
+            Quick::Undo => "undo",
+            Quick::Redo => "redo",
+            Quick::Home => "home",
+            Quick::Grid => "grid",
+            Quick::Color => "color",
+            Quick::Photos => "photos",
+            Quick::Layers => "layers",
+        }
+    }
+
+    pub fn from_code(c: &str) -> Quick {
+        Quick::ALL.into_iter().find(|q| q.code() == c.trim()).unwrap_or(Quick::None)
+    }
+
+    /// "pen,eraser,…" (saved next to the settings).
+    pub fn save_list(list: &[Quick; QUICK_SLOTS]) -> String {
+        list.iter().map(|q| q.code()).collect::<Vec<_>>().join(",")
+    }
+
+    pub fn load_list(text: &str) -> [Quick; QUICK_SLOTS] {
+        let mut out = [Quick::None; QUICK_SLOTS];
+        for (i, c) in text.trim().split(',').take(QUICK_SLOTS).enumerate() {
+            out[i] = Quick::from_code(c);
+        }
+        out
+    }
+}
+
+/// Picture shown in a square: drawn with lines, so it needs no icon font.
+#[derive(Clone, Copy, PartialEq)]
+enum Icon {
+    Menu,
+    Close,
+    Q(Quick),
+}
+
+/// Draws `icon` inside `r` (a square) with colour `c`; `fill` is the colour of the button behind it.
+fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, c: Color32, fill: Color32, current: Color32) {
+    let w = r.width();
+    let at = |x: f32, y: f32| egui::pos2(r.left() + x * w, r.top() + y * r.height());
+    let st = Stroke::new((w * 0.085).max(1.6), c);
+    let thin = Stroke::new((w * 0.06).max(1.2), c);
+    let line = |pts: &[(f32, f32)], s: Stroke| p.add(egui::Shape::line(pts.iter().map(|&(x, y)| at(x, y)).collect(), s));
+    // rotated shape around the centre, coordinates relative to the centre (−0.5…0.5)
+    let rot = |pts: &[(f32, f32)], deg: f32| -> Vec<egui::Pos2> {
+        let (sn, cs) = deg.to_radians().sin_cos();
+        pts.iter().map(|&(x, y)| at(0.5 + x * cs - y * sn, 0.5 + x * sn + y * cs)).collect()
+    };
+    match icon {
+        Icon::Menu => {
+            for y in [0.22, 0.5, 0.78] {
+                line(&[(0.12, y), (0.88, y)], st);
+            }
+        }
+        Icon::Close => {
+            line(&[(0.2, 0.2), (0.8, 0.8)], st);
+            line(&[(0.8, 0.2), (0.2, 0.8)], st);
+        }
+        Icon::Q(q) => match q {
+            Quick::None => {}
+            Quick::Pen => {
+                let body = rot(&[(-0.26, -0.11), (0.3, -0.11), (0.3, 0.11), (-0.26, 0.11)], 135.0);
+                p.add(egui::Shape::convex_polygon(body, fill, thin));
+                let tip = rot(&[(-0.26, -0.11), (-0.44, 0.0), (-0.26, 0.11)], 135.0);
+                p.add(egui::Shape::convex_polygon(tip, c, thin));
+                let cap = rot(&[(0.3, -0.11), (0.42, -0.11), (0.42, 0.11), (0.3, 0.11)], 135.0);
+                p.add(egui::Shape::convex_polygon(cap, c, thin));
+            }
+            Quick::Eraser => {
+                let body = rot(&[(-0.38, -0.17), (0.38, -0.17), (0.38, 0.17), (-0.38, 0.17)], -40.0);
+                p.add(egui::Shape::convex_polygon(body, fill, thin));
+                let half = rot(&[(-0.38, -0.17), (-0.02, -0.17), (-0.02, 0.17), (-0.38, 0.17)], -40.0);
+                p.add(egui::Shape::convex_polygon(half, c, thin));
+                line(&[(0.18, 0.9), (0.85, 0.9)], thin);
+            }
+            Quick::Hand => {
+                // finger: palm, raised index finger, thumb, and two little swipe marks
+                let palm = Rect::from_min_max(at(0.27, 0.46), at(0.79, 0.94));
+                p.rect(palm, CornerRadius::same((w * 0.14) as u8), fill, thin, egui::StrokeKind::Middle);
+                let thumb = rot(&[(-0.36, 0.06), (-0.2, -0.04), (-0.13, 0.06), (-0.27, 0.17)], 0.0);
+                p.add(egui::Shape::convex_polygon(thumb, fill, thin));
+                let finger = Rect::from_min_max(at(0.4, 0.06), at(0.58, 0.62));
+                p.rect(finger, CornerRadius::same((w * 0.09) as u8), fill, thin, egui::StrokeKind::Middle);
+                line(&[(0.62, 0.58), (0.62, 0.66)], thin);
+                line(&[(0.7, 0.6), (0.7, 0.68)], thin);
+                line(&[(0.22, 0.14), (0.3, 0.2)], thin);
+                line(&[(0.76, 0.14), (0.68, 0.2)], thin);
+            }
+            Quick::Select => {
+                let n = 16;
+                for i in 0..n {
+                    if i % 2 == 0 {
+                        let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
+                        let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
+                        line(&[(0.5 + 0.36 * a0.cos(), 0.44 + 0.3 * a0.sin()), (0.5 + 0.36 * a1.cos(), 0.44 + 0.3 * a1.sin())], thin);
+                    }
+                }
+                line(&[(0.36, 0.7), (0.3, 0.86), (0.4, 0.92)], thin);
+            }
+            Quick::Text => {
+                line(&[(0.18, 0.16), (0.82, 0.16)], st);
+                line(&[(0.5, 0.16), (0.5, 0.86)], st);
+                line(&[(0.38, 0.86), (0.62, 0.86)], thin);
+            }
+            Quick::Measure => {
+                let body = rot(&[(-0.46, -0.15), (0.46, -0.15), (0.46, 0.15), (-0.46, 0.15)], -35.0);
+                p.add(egui::Shape::convex_polygon(body, fill, thin));
+                for (i, x) in [-0.3f32, -0.15, 0.0, 0.15, 0.3].iter().enumerate() {
+                    let len = if i % 2 == 0 { 0.13 } else { 0.07 };
+                    let t = rot(&[(*x, -0.15), (*x, -0.15 + len)], -35.0);
+                    p.add(egui::Shape::line(t, thin));
+                }
+            }
+            Quick::Nudge => {
+                let pts: Vec<(f32, f32)> = (0..=20).map(|i| {
+                    let x = i as f32 / 20.0;
+                    (0.1 + 0.8 * x, 0.55 - 0.2 * (x * std::f32::consts::PI).sin())
+                }).collect();
+                line(&pts, st);
+                p.circle_stroke(at(0.5, 0.35), w * 0.16, thin);
+            }
+            Quick::Undo | Quick::Redo => {
+                let m = if q == Quick::Undo { 1.0 } else { -1.0 };
+                let fx = |x: f32| if m > 0.0 { x } else { 1.0 - x };
+                let arc: Vec<(f32, f32)> = (0..=14).map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 14.0);
+                    (fx(0.55 + 0.3 * a.cos()), 0.62 + 0.3 * a.sin())
+                }).collect();
+                line(&arc, st);
+                line(&[(fx(0.25), 0.62), (fx(0.25), 0.82)], st);
+                line(&[(fx(0.25), 0.82), (fx(0.08), 0.62)], st);
+                let _ = line(&[(fx(0.25), 0.82), (fx(0.42), 0.62)], st);
+                line(&[(fx(0.85), 0.62), (fx(0.85), 0.78)], st);
+            }
+            Quick::Home => {
+                line(&[(0.1, 0.48), (0.5, 0.12), (0.9, 0.48)], st);
+                line(&[(0.22, 0.38), (0.22, 0.88), (0.78, 0.88), (0.78, 0.38)], st);
+                line(&[(0.42, 0.88), (0.42, 0.62), (0.58, 0.62), (0.58, 0.88)], thin);
+            }
+            Quick::Grid => {
+                p.rect_stroke(Rect::from_min_max(at(0.12, 0.12), at(0.88, 0.88)), CornerRadius::same(2), thin, egui::StrokeKind::Middle);
+                for v in [0.37, 0.63] {
+                    line(&[(v, 0.12), (v, 0.88)], thin);
+                    line(&[(0.12, v), (0.88, v)], thin);
+                }
+            }
+            Quick::Color => {
+                p.circle_filled(at(0.5, 0.5), w * 0.38, current);
+                p.circle_stroke(at(0.5, 0.5), w * 0.38, Stroke::new(1.5, Color32::from_gray(120)));
+            }
+            Quick::Photos => {
+                p.rect_stroke(Rect::from_min_max(at(0.08, 0.16), at(0.92, 0.84)), CornerRadius::same(3), thin, egui::StrokeKind::Middle);
+                line(&[(0.14, 0.78), (0.4, 0.46), (0.58, 0.66), (0.7, 0.54), (0.86, 0.78)], thin);
+                p.circle_filled(at(0.68, 0.34), w * 0.07, c);
+            }
+            Quick::Layers => {
+                for dy in [0.14f32, -0.1] {
+                    let d = [(0.5, 0.34 + dy), (0.9, 0.52 + dy), (0.5, 0.7 + dy), (0.1, 0.52 + dy)];
+                    let pts: Vec<egui::Pos2> = d.iter().map(|&(x, y)| at(x, y)).collect();
+                    p.add(egui::Shape::convex_polygon(pts, fill, thin));
+                }
+            }
+        },
+    }
+}
+
+/// A square button with a drawn icon.
+fn square(ui: &mut egui::Ui, side: f32, icon: Icon, selected: bool, enabled: bool, current: Color32) -> egui::Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(side), sense);
+    let v = ui.style().interact_selectable(&resp, selected);
+    let fill = if selected { ui.visuals().selection.bg_fill } else { v.weak_bg_fill };
+    ui.painter().rect(rect, CornerRadius::same(9), fill, v.bg_stroke, egui::StrokeKind::Inside);
+    let mut c = if selected { ui.visuals().selection.stroke.color } else { v.fg_stroke.color };
+    if !enabled {
+        c = c.gamma_multiply(0.35);
+    }
+    draw_icon(ui.painter(), rect.shrink(side * 0.22), icon, c, fill, current);
     resp
 }
 
-/// The folded toolbar: a small tab with the current colour and brush; a tap slides the bar out.
-fn bar_tab(ctx: &egui::Context, s: &mut ToolState, anchor: Align2, offset: [f32; 2], slide: f32) -> Rect {
-    let frame = egui::Frame::popup(&ctx.global_style()).corner_radius(CornerRadius::same(12));
-    let r = egui::Area::new(egui::Id::unique("toolbar-tab")).anchor(anchor, [offset[0], offset[1] - slide]).show(ctx, |ui| {
-        frame.show(ui, |ui| {
+fn quick_button(ui: &mut egui::Ui, side: f32, q: Quick, s: &mut ToolState, info: &Info, a: &mut Actions) {
+    let tool = |q: Quick| match q {
+        Quick::Pen => Some(Tool::Pen),
+        Quick::Eraser => Some(Tool::Eraser),
+        Quick::Hand => Some(Tool::Hand),
+        Quick::Select => Some(Tool::Select),
+        Quick::Text => Some(Tool::Text),
+        Quick::Measure => Some(Tool::Measure),
+        Quick::Nudge => Some(Tool::Nudge),
+        _ => None,
+    };
+    let selected = tool(q).is_some_and(|t| s.tool == t) || (q == Quick::Grid && s.show_grid);
+    let enabled = match q {
+        Quick::Undo => info.can_undo,
+        Quick::Redo => info.can_redo,
+        _ => true,
+    };
+    let resp = square(ui, side, Icon::Q(q), selected, enabled, s.color).on_hover_text(q.name());
+    if q == Quick::Color {
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(side * 5.5);
+                colors(ui, s);
+            });
+        });
+        return;
+    }
+    if !resp.clicked() {
+        return;
+    }
+    if let Some(t) = tool(q) {
+        s.tool = t;
+    }
+    match q {
+        Quick::Undo => a.undo = true,
+        Quick::Redo => a.redo = true,
+        Quick::Home => a.home = true,
+        Quick::Grid => {
+            s.show_grid = !s.show_grid;
+            a.grid_changed = true;
+        }
+        Quick::Photos => a.photos = true,
+        Quick::Layers => a.layers = true,
+        _ => {}
+    }
+}
+
+/// More → Quick buttons: what each square next to the ☰ menu does. Returns (close, changed).
+pub fn quick_window(ctx: &egui::Context, s: &mut ToolState, safe_top: f32) -> (bool, bool) {
+    let mut close = false;
+    let mut changed = false;
+    egui::Window::new(t("Szybkie przyciski"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_TOP, [0.0, 70.0 + safe_top])
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new(t("Wybierz, co pokazuje każdy kwadracik obok menu.")).small().weak());
+            ui.add_space(4.0);
+            let side = ui.spacing().interact_size.y;
+            for i in 0..QUICK_SLOTS {
+                ui.horizontal(|ui| {
+                    square(ui, side, Icon::Q(s.quick[i]), false, true, s.color);
+                    let before = s.quick[i];
+                    egui::ComboBox::from_id_salt(format!("quick-slot-{i}"))
+                        .selected_text(tf("Przycisk {}", &[&(i + 1)]) + ": " + s.quick[i].name())
+                        .width(ui.available_width().min(240.0))
+                        .show_ui(ui, |ui| {
+                            for q in Quick::ALL {
+                                ui.selectable_value(&mut s.quick[i], q, q.name());
+                            }
+                        });
+                    changed |= s.quick[i] != before;
+                });
+            }
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let mut open = chevron_button(ui, false).on_hover_text(t("Pokaż pasek narzędzi")).clicked();
-                let size = ui.spacing().interact_size.y;
-                let (dot, resp) = ui.allocate_exact_size(Vec2::splat(size * 0.8), Sense::click());
-                let color = if s.tool == Tool::Eraser { Color32::from_gray(200) } else { s.color };
-                ui.painter().circle_filled(dot.center(), size * 0.3, color);
-                ui.painter().circle_stroke(dot.center(), size * 0.3, Stroke::new(1.0, Color32::from_gray(120)));
-                open |= resp.clicked();
-                let name = if s.tool == Tool::Eraser { t("Gumka") } else { s.shape.map_or(short_name(s.brush), |sh| t(sh.name())) };
-                open |= ui.add(egui::Label::new(name).sense(Sense::click())).clicked();
-                if open {
-                    s.bar_open = true;
+                if ui.button(t("Gotowe")).clicked() {
+                    close = true;
+                }
+                if ui.button(t("Domyślne")).clicked() {
+                    s.quick = Quick::DEFAULT;
+                    changed = true;
                 }
             });
         });
-    });
-    r.response.rect
+    (close, changed)
 }
 
 pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f32) -> (Actions, Vec<Rect>) {
@@ -381,88 +681,90 @@ pub fn toolbar(ctx: &egui::Context, s: &mut ToolState, info: &Info, safe_top: f3
         }
     });
 
-    // Explicit rows instead of `horizontal_wrapped`: egui's sliders are nested horizontal
-    // groups that never wrap, which pushed the toolbar off narrow phone screens.
+    // The menu folds away by itself when a stroke starts (More → can be switched off).
+    if info.drawing && s.bar_autohide {
+        s.bar_open = false;
+    }
+
     let [left, right] = info.safe_side;
     let screen_w = ctx.content_rect().width() - left - right;
     let frame = egui::Frame::popup(&ctx.global_style()).corner_radius(CornerRadius::same(12));
     let inner_w = (screen_w - 16.0 - frame.total_margin().sum().x).max(150.0);
     let compact = inner_w < 760.0;
-    let anchor = if compact { Align2::LEFT_TOP } else { Align2::CENTER_TOP };
-    let offset = if compact { [8.0 + left, 8.0 + safe_top] } else { [(left - right) * 0.5, 8.0 + safe_top] };
-    // Sliding: the bar folds up into a small tab (button), and also slides away while drawing.
-    let hidden_by_drawing = s.bar_autohide && info.drawing;
-    let shown = ctx.animate_bool_with_time(egui::Id::unique("toolbar-shown"), s.bar_open && !hidden_by_drawing, 0.18);
-    let tab_shown = ctx.animate_bool_with_time(egui::Id::unique("toolbar-tab-shown"), !s.bar_open && !hidden_by_drawing, 0.18);
-    let h_id = egui::Id::unique("toolbar-height");
-    let bar_h = ctx.data(|d| d.get_temp::<f32>(h_id)).unwrap_or(140.0);
-    if tab_shown > 0.001 {
-        let tab = bar_tab(ctx, s, anchor, offset, (60.0 + offset[1]) * (1.0 - tab_shown));
-        if tab_shown > 0.5 {
-            rects.push(tab);
-        }
-    }
-    if shown <= 0.001 {
-        if egui::Popup::is_any_open(ctx) {
-            rects.push(Rect::EVERYTHING);
-        }
-        return (a, rects);
-    }
-    let slide = (bar_h + offset[1] + 8.0) * (1.0 - shown);
-    let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(anchor, [offset[0], offset[1] - slide]).show(ctx, |ui| {
-        frame.show(ui, |ui| {
-            ui.set_max_width(inner_w);
-            // Rows wrap when a language's words are long (German, Russian…).
-            if compact {
-                ui.horizontal_wrapped(|ui| {
-                    if chevron_button(ui, true).on_hover_text(t("Schowaj pasek narzędzi")).clicked() {
-                        s.bar_open = false;
+
+    // Top row, always visible: ☰ menu + the quick squares.
+    let top = egui::Area::new(egui::Id::unique("toolbar-top")).anchor(Align2::LEFT_TOP, [8.0 + left, 8.0 + safe_top]).show(ctx, |ui| {
+        frame.inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let side = (ui.spacing().interact_size.y * 1.15).round();
+                let icon = if s.bar_open { Icon::Close } else { Icon::Menu };
+                let tip = if s.bar_open { t("Schowaj pasek narzędzi") } else { t("Pokaż pasek narzędzi") };
+                if square(ui, side, icon, s.bar_open, true, s.color).on_hover_text(tip).clicked() {
+                    s.bar_open = !s.bar_open;
+                }
+                let quick = s.quick;
+                for q in quick {
+                    if q != Quick::None {
+                        quick_button(ui, side, q, s, info, &mut a);
                     }
-                    menu_button(ui, &mut a);
-                    tool_buttons(ui, s);
-                    history_buttons(ui, info, &mut a);
-                });
-                ui.horizontal_wrapped(|ui| {
-                    colors(ui, s);
-                    hand_button(ui, s);
-                    photos_button(ui, &mut a, s);
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().slider_width = ui.spacing().slider_width.min(90.0);
-                    size_slider(ui, s, false);
-                    ui.separator();
-                    home_button(ui, &mut a);
-                    rotation_button(ui, info, &mut a);
-                    zoom_label(ui, info);
-                });
-            } else {
-                ui.horizontal_wrapped(|ui| {
-                    if chevron_button(ui, true).on_hover_text(t("Schowaj pasek narzędzi")).clicked() {
-                        s.bar_open = false;
-                    }
-                    menu_button(ui, &mut a);
-                    ui.separator();
-                    tool_buttons(ui, s);
-                    hand_button(ui, s);
-                    ui.separator();
-                    colors(ui, s);
-                    ui.separator();
-                    size_slider(ui, s, true);
-                    ui.separator();
-                    history_buttons(ui, info, &mut a);
-                    home_button(ui, &mut a);
-                    photos_button(ui, &mut a, s);
-                    ui.separator();
-                    rotation_button(ui, info, &mut a);
-                    zoom_label(ui, info);
-                });
-            }
+                }
+            });
         });
     });
-    if shown >= 0.999 {
-        ctx.data_mut(|d| d.insert_temp(h_id, resp.response.rect.height()));
+    rects.push(top.response.rect);
+
+    // The full menu slides down under the top row.
+    let shown = ctx.animate_bool_with_time(egui::Id::unique("toolbar-shown"), s.bar_open, 0.16);
+    if shown > 0.001 {
+        let y = top.response.rect.bottom() + 6.0 - 24.0 * (1.0 - shown);
+        let resp = egui::Area::new(egui::Id::unique("toolbar")).anchor(Align2::LEFT_TOP, [8.0 + left, y]).show(ctx, |ui| {
+            ui.multiply_opacity(shown);
+            frame.show(ui, |ui| {
+                ui.set_max_width(inner_w);
+                // Rows wrap when a language's words are long (German, Russian…).
+                if compact {
+                    ui.horizontal_wrapped(|ui| {
+                        menu_button(ui, &mut a);
+                        tool_buttons(ui, s);
+                        history_buttons(ui, info, &mut a);
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        colors(ui, s);
+                        hand_button(ui, s);
+                        photos_button(ui, &mut a, s);
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().slider_width = ui.spacing().slider_width.min(90.0);
+                        size_slider(ui, s, false);
+                        ui.separator();
+                        home_button(ui, &mut a);
+                        rotation_button(ui, info, &mut a);
+                        zoom_label(ui, info);
+                    });
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        menu_button(ui, &mut a);
+                        ui.separator();
+                        tool_buttons(ui, s);
+                        hand_button(ui, s);
+                        ui.separator();
+                        colors(ui, s);
+                        ui.separator();
+                        size_slider(ui, s, true);
+                        ui.separator();
+                        history_buttons(ui, info, &mut a);
+                        home_button(ui, &mut a);
+                        photos_button(ui, &mut a, s);
+                        ui.separator();
+                        rotation_button(ui, info, &mut a);
+                        zoom_label(ui, info);
+                    });
+                }
+            });
+        });
+        rects.push(resp.response.rect);
     }
-    rects.push(resp.response.rect);
     // Popups (colour picker) also block the canvas.
     if egui::Popup::is_any_open(ctx) || ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input() {
         rects.push(Rect::EVERYTHING);
@@ -1318,40 +1620,65 @@ mod layout_tests {
         assert!(bar.min.x >= 0.0 && bar.max.x <= 360.0 && bar.max.y <= 800.0, "{bar:?}");
     }
 
-    /// The toolbar folds into a small tab, and slides away while a stroke is drawn.
+    /// The menu opens from ☰ (a real tap, like on Android), folds away when drawing starts,
+    /// and the quick squares sit next to ☰.
     #[test]
-    fn toolbar_folds_and_hides_while_drawing() {
+    fn menu_opens_from_the_hamburger_and_hides_while_drawing() {
         let ctx = egui::Context::default();
         let mut s = ToolState::default();
         let mut info = Info { can_undo: true, can_redo: false, log_zoom: 0.0, rotation: 0.0, strokes: 0, safe_side: [0.0, 0.0], drawing: false };
         let mut time = 0.0;
-        let mut frames = |s: &mut ToolState, info: &Info| {
-            let mut rects = Vec::new();
-            for _ in 0..12 {
-                time += 0.05;
-                let raw = egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),
-                    time: Some(time),
-                    ..Default::default()
-                };
-                let mut out = ctx.run_ui(raw, |ui| rects = toolbar(ui.ctx(), s, info, 24.0).1);
-                out.textures_delta.clear();
-            }
-            rects
+        let mut frame = |s: &mut ToolState, info: &Info, events: Vec<egui::Event>| {
+            time += 0.05;
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut res = (Actions::default(), Vec::new());
+            let mut out = ctx.run_ui(raw, |ui| res = toolbar(ui.ctx(), s, info, 24.0));
+            out.textures_delta.clear();
+            res
         };
-        let open = frames(&mut s, &info);
-        assert!(open[0].min.y >= 24.0 && open[0].height() > 60.0, "{open:?}");
-        s.bar_open = false;
-        let folded = frames(&mut s, &info);
-        assert_eq!(folded.len(), 1, "{folded:?}");
-        assert!(folded[0].min.y >= 24.0 && folded[0].height() < 60.0 && folded[0].width() < 220.0, "tab: {folded:?}");
-        s.bar_open = true;
+        let tap = |p: egui::Pos2| {
+            vec![
+                vec![egui::Event::PointerMoved(p), egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+                vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }, egui::Event::PointerGone],
+            ]
+        };
+        let mut r = (Actions::default(), Vec::new());
+        for _ in 0..6 { r = frame(&mut s, &info, vec![]); }
+        assert!(!s.bar_open, "the menu starts folded");
+        assert_eq!(r.1.len(), 1, "only the top row: {:?}", r.1);
+        let top = r.1[0];
+        assert!(top.min.y >= 24.0 && top.width() <= 360.0 && top.height() < 70.0, "{top:?}");
+        // ☰ is the first square
+        let menu = top.min + egui::vec2(24.0, top.height() * 0.5);
+        for ev in tap(menu) { frame(&mut s, &info, ev); }
+        assert!(s.bar_open, "tap on ☰ at {menu:?} in {top:?}");
+        for _ in 0..8 { r = frame(&mut s, &info, vec![]); }
+        assert_eq!(r.1.len(), 2, "{:?}", r.1);
+        assert!(r.1[1].min.y > top.max.y && r.1[1].height() > 60.0, "menu under the row: {:?}", r.1);
+        // the quick squares: the 4th one (undo) undoes
+        let side = (ctx.global_style().spacing.interact_size.y * 1.15).round();
+        let x0 = top.min.x + (top.width() - (side + 6.0) * 6.0 + 6.0) * 0.5;   // squares are centred in the frame
+        let undo = egui::pos2(x0 + (side + 6.0) * 4.0 + side * 0.5, top.center().y);
+        let mut undone = false;
+        for ev in tap(undo) { undone |= frame(&mut s, &info, ev).0.undo; }
+        assert!(undone, "undo square at {undo:?}");
+        // eraser square (2nd quick = 3rd square) picks the eraser
+        let eraser = egui::pos2(x0 + (side + 6.0) * 2.0 + side * 0.5, top.center().y);
+        for ev in tap(eraser) { frame(&mut s, &info, ev); }
+        assert_eq!(s.tool, Tool::Eraser);
+        // drawing folds the menu
         info.drawing = true;
-        let drawing = frames(&mut s, &info);
-        assert!(drawing.iter().all(|r| r.max.y <= 0.0), "while drawing: {drawing:?}");
-        info.drawing = false;
-        let back = frames(&mut s, &info);
-        assert!(back[0].min.y >= 24.0 && back[0].height() > 60.0, "{back:?}");
+        for _ in 0..8 { r = frame(&mut s, &info, vec![]); }
+        assert!(!s.bar_open && r.1.len() == 1, "{:?}", r.1);
+        // quick list survives saving
+        let saved = Quick::save_list(&s.quick);
+        assert_eq!(Quick::load_list(&saved), s.quick);
+        assert_eq!(Quick::load_list("hand,nonsense"), [Quick::Hand, Quick::None, Quick::None, Quick::None, Quick::None]);
     }
 
     /// Dragging over clickable cells scrolls the list (touch screens send mouse-like events)

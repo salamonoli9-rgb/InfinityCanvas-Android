@@ -25,6 +25,8 @@ const AUTOSAVE_DELAY: Duration = Duration::from_millis(1500);
 /// Pan inertia decay rate (1/s) and zoom inertia decay rate.
 const PAN_DECAY: f64 = 4.0;
 const ZOOM_DECAY: f64 = 6.0;
+/// File (next to the settings) with the quick squares chosen next to ☰.
+const QUICK_FILE: &str = "quick.txt";
 /// Minimum distance between stored samples, in local units (≈ px at drawing time).
 const MIN_SAMPLE_DIST: f32 = 0.4;
 /// Rotation closer to upright than this (radians, ~6°) snaps to 0 when the fingers lift.
@@ -133,6 +135,8 @@ pub struct CanvasApp {
     pending_export: bool,
     bookmark_panel: ui::BookmarkPanel,
     layer_panel: ui::LayerPanel,
+    /// The window choosing the quick squares next to ☰ is open.
+    quick_open: bool,
     /// Id of the layer new strokes go to.
     pub active_layer: u32,
     /// Strokes added since the last frame (rendered without delay).
@@ -426,6 +430,7 @@ impl CanvasApp {
             pending_export: false,
             bookmark_panel: ui::BookmarkPanel::default(),
             layer_panel: ui::LayerPanel::default(),
+            quick_open: false,
             active_layer: 0,
             urgent: Vec::new(),
             content_rev: 0,
@@ -633,6 +638,9 @@ impl CanvasApp {
     /// for the language (preselected: `guess`) and phone / tablet.
     pub fn load_settings(&mut self, dir: &Path, guess: crate::i18n::Lang) {
         self.settings_dir = Some(dir.to_path_buf());
+        if let Ok(text) = std::fs::read_to_string(dir.join(QUICK_FILE)) {
+            self.tools.quick = ui::Quick::load_list(&text);
+        }
         match Settings::load(dir) {
             Some(s) => self.apply_settings(s),
             None => {
@@ -2232,6 +2240,18 @@ impl CanvasApp {
             if self.video.is_some() {
                 r.push(egui::Rect::EVERYTHING);
             }
+            if self.quick_open {
+                let (close, changed) = ui::quick_window(ui.ctx(), &mut self.tools, self.safe_top);
+                r.push(egui::Rect::EVERYTHING);
+                if changed && let Some(dir) = &self.settings_dir {
+                    if let Err(e) = std::fs::write(dir.join(QUICK_FILE), ui::Quick::save_list(&self.tools.quick)) {
+                        log::warn!("quick buttons not saved: {e}");
+                    }
+                }
+                if close {
+                    self.quick_open = false;
+                }
+            }
             text_action = ui::text_window(ui.ctx(), &mut self.text_panel, &mut self.tools.text_size, self.safe_top);
             if self.text_panel.open {
                 r.push(egui::Rect::EVERYTHING);
@@ -2341,6 +2361,9 @@ impl CanvasApp {
         }
         if actions.settings {
             self.open_settings();
+        }
+        if actions.quick_settings {
+            self.quick_open = true;
         }
         if actions.layers {
             self.layer_panel.open = !self.layer_panel.open;

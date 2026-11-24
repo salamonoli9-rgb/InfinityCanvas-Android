@@ -39,9 +39,13 @@ fn every_language_fits() {
             for brush in Brush::ALL {
                 let mut s = ToolState::default();
                 s.set_brush(brush);
-                let mut rect = Rect::NOTHING;
-                run(&ctx, w, |c| rect = ui::toolbar(c, &mut s, &info, 24.0).1[0]);
-                assert!(rect.min.x >= 0.0 && rect.max.x <= w, "{device:?} {lang:?} {brush:?}: {rect:?}");
+                s.bar_open = true;               // the open menu (under ☰) and the row of squares
+                let mut rects = Vec::new();
+                run(&ctx, w, |c| rects = ui::toolbar(c, &mut s, &info, 24.0).1);
+                for rect in rects.iter().filter(|r| **r != Rect::EVERYTHING) {
+                    assert!(rect.min.x >= 0.0 && rect.max.x <= w, "{device:?} {lang:?} {brush:?}: {rects:?}");
+                }
+                assert!(rects.len() >= 2, "{device:?} {lang:?}: menu not shown {rects:?}");
             }
             let mut rect = Rect::NOTHING;
             run(&ctx, w, |c| rect = ui::selection_bar(c, 12).1);
